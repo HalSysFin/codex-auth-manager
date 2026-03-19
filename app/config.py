@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     codex_switch_bin: str = "codex-switch"
     codex_auth_path: str = "~/.codex/auth.json"
     callback_store_dir: str = "~/.codex-switch/callbacks"
+    codex_profiles_dir: str = "~/.codex-switch/profiles"
+    internal_api_token: str | None = None
+    rate_limit_probe_url: str = "https://api.openai.com/v1/models"
+    openai_organization: str | None = None
+    openai_project: str | None = None
     openai_token_url: str | None = None
     openai_client_id: str | None = None
     openai_client_secret: str | None = None
@@ -24,6 +29,9 @@ class Settings(BaseSettings):
 
     def callback_dir(self) -> Path:
         return _expand(self.callback_store_dir)
+
+    def profiles_dir(self) -> Path:
+        return _expand(self.codex_profiles_dir)
 
 
 settings = Settings()
