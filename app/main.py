@@ -1106,497 +1106,544 @@ def _render_login(next_path: str) -> str:
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Auth Manager Login</title>
+    <title>Auth Manager | Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&family=Inter:wght@400;500&display=swap" rel="stylesheet" />
     <style>
       :root {{
-        --bg: #0b1320;
-        --panel: #132033;
-        --text: #e8f0ff;
-        --muted: #9eb0cc;
-        --border: rgba(255,255,255,0.12);
-        --accent: #5fd0a5;
+        --bg: #030712;
+        --glass: rgba(17, 24, 39, 0.7);
+        --glass-border: rgba(255, 255, 255, 0.08);
+        --text: #f8fafc;
+        --muted: #94a3b8;
+        --accent: #10b981;
+        --accent-glow: rgba(16, 185, 129, 0.4);
       }}
       * {{ box-sizing: border-box; }}
       body {{
         margin: 0;
         min-height: 100vh;
-        display: grid;
-        place-items: center;
-        font-family: "Space Grotesk", sans-serif;
-        background: radial-gradient(circle at 20% 10%, rgba(95,208,165,0.18), transparent 45%), var(--bg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: 'Inter', sans-serif;
+        background-color: var(--bg);
+        background-image: 
+          radial-gradient(at 0% 0%, rgba(16, 185, 129, 0.15) 0px, transparent 50%),
+          radial-gradient(at 100% 0%, rgba(59, 130, 246, 0.15) 0px, transparent 50%),
+          radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.1) 0px, transparent 50%),
+          radial-gradient(at 0% 100%, rgba(59, 130, 246, 0.1) 0px, transparent 50%);
         color: var(--text);
       }}
-      .card {{
-        width: min(420px, 92vw);
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 14px;
-        padding: 22px;
+      .login-container {{
+        width: min(400px, 90vw);
+        padding: 40px;
+        background: var(--glass);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border: 1px solid var(--glass-border);
+        border-radius: 24px;
+        box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+        animation: fadeIn 0.6s ease-out;
       }}
-      h1 {{ margin: 0 0 8px; font-size: 24px; }}
-      p {{ margin: 0 0 16px; color: var(--muted); }}
-      label {{ display: block; margin: 10px 0 6px; font-size: 13px; color: var(--muted); }}
+      @keyframes fadeIn {{
+        from {{ opacity: 0; transform: translateY(10px); }}
+        to {{ opacity: 1; transform: translateY(0); }}
+      }}
+      h1 {{ 
+        margin: 0 0 8px; 
+        font-family: 'Outfit', sans-serif;
+        font-size: 28px; 
+        font-weight: 700;
+        background: linear-gradient(135deg, #fff 0%, #94a3b8 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }}
+      p {{ 
+        margin: 0 0 32px; 
+        color: var(--muted); 
+        font-size: 14px; 
+        line-height: 1.6;
+      }}
+      .form-group {{ margin-bottom: 20px; }}
+      label {{ 
+        display: block; 
+        margin-bottom: 8px; 
+        font-size: 13px; 
+        font-weight: 500;
+        color: var(--muted); 
+      }}
       input {{
         width: 100%;
-        border-radius: 10px;
-        border: 1px solid var(--border);
-        background: #0d1727;
+        height: 48px;
+        border-radius: 12px;
+        border: 1px solid var(--glass-border);
+        background: rgba(0, 0, 0, 0.2);
         color: var(--text);
-        padding: 10px 12px;
+        padding: 0 16px;
+        font-size: 15px;
+        transition: all 0.2s ease;
+        outline: none;
+      }}
+      input:focus {{
+        border-color: var(--accent);
+        background: rgba(0, 0, 0, 0.3);
+        box-shadow: 0 0 0 4px var(--accent-glow);
       }}
       button {{
-        margin-top: 14px;
+        margin-top: 12px;
         width: 100%;
+        height: 50px;
         border: none;
-        border-radius: 10px;
-        padding: 10px 12px;
-        background: linear-gradient(135deg, var(--accent), #6ca6ff);
-        color: #001818;
+        border-radius: 14px;
+        background: var(--accent);
+        color: #064e3b;
+        font-family: 'Outfit', sans-serif;
         font-weight: 700;
+        font-size: 16px;
         cursor: pointer;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        box-shadow: 0 10px 15px -3px var(--accent-glow);
+      }}
+      button:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 15px 20px -5px var(--accent-glow);
+        filter: brightness(1.1);
+      }}
+      button:active {{ transform: translateY(0); }}
+      .footer {{
+        margin-top: 24px;
+        text-align: center;
+        font-size: 12px;
+        color: var(--muted);
       }}
     </style>
   </head>
   <body>
-    <form class="card" method="post" action="/login">
-      <h1>Sign in</h1>
-      <p>Public access requires credentials. Internal-network access is allowed automatically.</p>
-      <input type="hidden" name="next" value="{safe_next}" />
-      <label for="username">Username</label>
-      <input id="username" name="username" type="text" autocomplete="username" required />
-      <label for="password">Password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required />
-      <button type="submit">Login</button>
-    </form>
+    <div class="login-container">
+      <form method="post" action="/login">
+        <h1>Welcome Back</h1>
+        <p>Sign in to manage your auth profiles. Access is restricted to trusted networks.</p>
+        <input type="hidden" name="next" value="{safe_next}" />
+        <div class="form-group">
+          <label for="username">Username</label>
+          <input id="username" name="username" type="text" autocomplete="username" placeholder="Enter username" required />
+        </div>
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" required />
+        </div>
+        <button type="submit">Sign In</button>
+        <div class="footer">
+          Auth Manager &copy; 2026
+        </div>
+      </form>
+    </div>
   </body>
 </html>"""
 
 
 def _render_index() -> str:
     return """<!doctype html>
-<html lang=\"en\">
+<html lang="en">
   <head>
-    <meta charset=\"utf-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Codex Auth Manager</title>
-    <link rel=\"preconnect\" href=\"https://fonts.googleapis.com\" />
-    <link rel=\"preconnect\" href=\"https://fonts.gstatic.com\" crossorigin />
-    <link href=\"https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&display=swap\" rel=\"stylesheet\" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
     <style>
-      :root {
-        --bg: #091016;
-        --panel: #15202b;
-        --panel-2: #1c2a37;
-        --text: #ecf3ff;
-        --muted: #a1aec2;
-        --accent: #85d6ff;
-        --accent-2: #97f7b1;
-        --warn: #ffd86b;
-        --border: rgba(255, 255, 255, 0.1);
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      :root{
+        --bg:#0A0A0A;--surface:#171717;--surface-hi:#262626;
+        --border:#262626;--border-hi:#404040;
+        --text:#EDEDED;--dim:#A3A3A3;--green:#10B981;--blue:#38BDF8;
+        --amber:#F59E0B;--red:#EF4444;--radius:10px;
       }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: \"Space Grotesk\", sans-serif;
-        color: var(--text);
-        background: radial-gradient(circle at 15% 5%, rgba(133,214,255,0.2), transparent 45%),
-                    radial-gradient(circle at 85% 5%, rgba(151,247,177,0.2), transparent 40%),
-                    var(--bg);
-        min-height: 100vh;
-        padding: 28px 16px;
+      html{font-size:15px}
+      body{
+        font-family:'Inter',system-ui,sans-serif;color:var(--text);min-height:100vh;
+        background:var(--bg);
       }
-      .shell {
-        width: min(1080px, 100%);
-        margin: 0 auto;
-        display: grid;
-        gap: 18px;
+
+      /* ── NAV BAR ─────────────────────────── */
+      .navbar{
+        position:sticky;top:0;z-index:50;
+        display:flex;align-items:center;justify-content:space-between;
+        padding:16px 32px;gap:16px;flex-wrap:wrap;
+        background:rgba(10,10,10,.85);backdrop-filter:blur(14px);
+        border-bottom:1px solid var(--border);
       }
-      .top {
-        display: grid;
-        gap: 10px;
+      .nav-brand{
+        font-family:'Outfit',sans-serif;font-weight:700;font-size:1.35rem;
+        letter-spacing:-.02em;color:var(--text);display:flex;align-items:center;gap:10px;
       }
-      .top-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 12px;
-        flex-wrap: wrap;
+      .nav-brand .dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+        box-shadow:0 0 6px rgba(16,185,129,.4);}
+      .nav-actions{display:flex;gap:10px;flex-wrap:wrap}
+
+      /* ── BUTTONS ──────────────────────────── */
+      .btn{
+        height:38px;padding:0 18px;border-radius:6px;border:1px solid var(--border);
+        background:var(--surface);color:var(--text);font-family:'Inter',sans-serif;
+        font-weight:500;font-size:.85rem;cursor:pointer;
+        display:inline-flex;align-items:center;gap:7px;
+        transition:background .2s,border-color .2s,transform .15s;
       }
-      h1 {
-        margin: 0;
-        font-size: 28px;
+      .btn:hover{background:var(--surface-hi);border-color:var(--border-hi);}
+      .btn-primary{background:var(--text);color:var(--bg);border:none;font-weight:600;}
+      .btn-primary:hover{background:#FFFFFF;}
+      .btn-icon{width:38px;padding:0;justify-content:center}
+      .btn-sm{height:34px;padding:0 14px;font-size:.8rem;border-radius:6px}
+
+      /* ── LAYOUT ───────────────────────────── */
+      .page{max-width:1140px;margin:0 auto;padding:32px 24px 60px}
+      .two-col{display:grid;grid-template-columns:320px 1fr;gap:24px;align-items:start}
+
+      /* ── SIDEBAR ──────────────────────────── */
+      .sidebar{display:flex;flex-direction:column;gap:16px;position:sticky;top:88px}
+      .panel{
+        background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+        padding:20px;
       }
-      .subtitle {
-        color: var(--muted);
-        font-size: 14px;
+      .panel-title{
+        font-family:'Outfit',sans-serif;font-size:.75rem;font-weight:600;
+        text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-bottom:14px;
       }
-      .toolbar {
-        display: flex;
-        gap: 8px;
-        flex-wrap: wrap;
+      .kv-list{display:flex;flex-direction:column;gap:14px}
+      .kv-item .kv-label{font-size:.7rem;font-weight:600;text-transform:uppercase;
+        letter-spacing:.06em;color:var(--dim);margin-bottom:3px}
+      .kv-item .kv-value{font-family:'Outfit',sans-serif;font-size:1.15rem;font-weight:700;
+        color:var(--text);word-break:break-word}
+      .kv-item .kv-value.small{font-size:.85rem;font-weight:500}
+
+      /* status dot */
+      .status-dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+      .status-dot.green{background:var(--green);box-shadow:0 0 5px var(--green)}
+      .status-dot.amber{background:var(--amber);box-shadow:0 0 5px var(--amber)}
+      .status-dot.red{background:var(--red);box-shadow:0 0 5px var(--red)}
+
+      .token-bar{
+        display:flex;align-items:center;gap:10px;padding:12px 16px;
+        background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+        margin-bottom:24px;
       }
-      button,
-      .btn {
-        background: var(--panel-2);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 8px 12px;
-        font-size: 13px;
-        cursor: pointer;
+      .token-bar input{
+        flex:1;height:38px;background:var(--bg);border:1px solid var(--border);
+        border-radius:8px;padding:0 14px;color:var(--text);font-size:.85rem;outline:none;
+        font-family:'Inter',sans-serif;transition:border-color .2s;
       }
-      button.primary {
-        background: linear-gradient(135deg, #4eb8e6, #45cf8f);
-        color: #042220;
-        font-weight: 600;
+      .token-bar input:focus{border-color:var(--blue)}
+      .token-bar input::placeholder{color:var(--dim)}
+
+      /* ── TOAST / STATUS ───────────────────── */
+      #statusNote{
+        padding:12px 18px;border-radius:10px;font-size:.85rem;display:none;margin-bottom:16px;
       }
-      .token-box {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 10px 12px;
+      #statusNote.show{display:flex;align-items:center;gap:8px}
+      #statusNote.warn{background:rgba(251,191,36,.08);color:var(--amber);
+        border:1px solid rgba(251,191,36,.18)}
+      #statusNote.ok{background:rgba(52,211,153,.08);color:var(--green);
+        border:1px solid rgba(52,211,153,.18)}
+
+      /* ── ACCOUNT TABLE ────────────────────── */
+      .accounts-table{width:100%;border-collapse:separate;border-spacing:0}
+      .accounts-table th{
+        font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.07em;
+        color:var(--dim);text-align:left;padding:10px 14px;
+        border-bottom:1px solid var(--border);
       }
-      .token-box input {
-        background: transparent;
-        border: none;
-        outline: none;
-        color: var(--text);
-        width: 200px;
-        font-size: 13px;
+      .accounts-table td{
+        padding:14px;border-bottom:1px solid var(--border);vertical-align:middle;
+        font-size:.88rem;
       }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 14px;
-        box-shadow: 0 14px 24px rgba(0, 0, 0, 0.28);
+      .accounts-table tr:last-child td{border-bottom:none}
+      .accounts-table tr:hover td{background:rgba(148,163,184,.04)}
+
+      .acct-name{font-family:'Outfit',sans-serif;font-weight:600;font-size:.95rem}
+      .acct-email{color:var(--dim);font-size:.8rem;margin-top:2px}
+      .pill{
+        display:inline-flex;align-items:center;gap:5px;
+        padding:4px 10px;border-radius:4px;font-size:.72rem;font-weight:600;
+        border:1px solid var(--border);color:var(--dim);background:transparent;
       }
-      .status-grid {
-        display: grid;
-        gap: 10px;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      .pill.active{color:var(--green);border-color:rgba(16,185,129,.35);
+        background:rgba(16,185,129,.08)}
+
+      /* progress bar for limits */
+      .limit-bar-wrap{display:flex;flex-direction:column;gap:6px}
+      .limit-bar-row{display:flex;align-items:center;gap:10px}
+      .limit-bar-label{font-size:.72rem;font-weight:600;text-transform:uppercase;
+        letter-spacing:.05em;color:var(--dim);min-width:50px}
+      .limit-bar-track{flex:1;height:6px;border-radius:99px;background:var(--bg);
+        overflow:hidden;border:1px solid var(--border)}
+      .limit-bar-fill{height:100%;border-radius:99px;transition:width .6s ease}
+      .limit-bar-fill.ok{background:var(--green)}
+      .limit-bar-fill.warn{background:var(--amber)}
+      .limit-bar-fill.danger{background:var(--red)}
+      .limit-bar-text{font-size:.78rem;font-weight:600;min-width:52px;text-align:right;
+        font-family:'Outfit',sans-serif}
+
+      .acct-actions{display:flex;gap:6px}
+
+      /* empty state */
+      .empty-state{
+        text-align:center;padding:48px 20px;color:var(--dim);
       }
-      .status-title {
-        color: var(--muted);
-        font-size: 12px;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
+      .empty-state .empty-icon{font-size:2.5rem;margin-bottom:12px;opacity:.4}
+      .empty-state p{font-size:.9rem;line-height:1.5}
+
+      /* ── RESPONSIVE ───────────────────────── */
+      @media(max-width:860px){
+        .two-col{grid-template-columns:1fr}
+        .sidebar{position:static;flex-direction:row;flex-wrap:wrap}
+        .sidebar .panel{flex:1;min-width:240px}
+        .navbar{padding:14px 16px}
+        .page{padding:20px 14px 48px}
       }
-      .status-value {
-        margin-top: 4px;
-        font-size: 16px;
-        font-weight: 600;
-      }
-      .grid {
-        display: grid;
-        gap: 12px;
-      }
-      .account-head {
-        display: flex;
-        justify-content: space-between;
-        gap: 10px;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-      .label {
-        font-size: 16px;
-        font-weight: 600;
-      }
-      .email {
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .pill {
-        border-radius: 999px;
-        padding: 5px 10px;
-        font-size: 11px;
-        border: 1px solid var(--border);
-        color: var(--muted);
-      }
-      .pill.active {
-        background: rgba(151,247,177,0.2);
-        color: var(--accent-2);
-        border-color: rgba(151,247,177,0.4);
-      }
-      .actions {
-        display: flex;
-        gap: 8px;
-        margin-bottom: 6px;
-      }
-      .limit-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-top: 1px solid var(--border);
-        padding-top: 8px;
-        margin-top: 8px;
-      }
-      .limit-title {
-        font-size: 14px;
-      }
-      .limit-sub {
-        font-size: 12px;
-        color: var(--muted);
-      }
-      .percent {
-        color: var(--accent);
-        font-weight: 600;
-      }
-      .percent.alt { color: var(--accent-2); }
-      .status-note {
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .status-note.warn {
-        color: var(--warn);
-      }
-      @media (max-width: 680px) {
-        .token-box input { width: 140px; }
-        .actions { flex-wrap: wrap; }
+      @media(max-width:600px){
+        .accounts-table thead{display:none}
+        .accounts-table,
+        .accounts-table tbody,
+        .accounts-table tr,
+        .accounts-table td{display:block;width:100%}
+        .accounts-table tr{
+          background:var(--surface);border:1px solid var(--border);
+          border-radius:var(--radius);padding:16px;margin-bottom:12px;
+        }
+        .accounts-table td{border:none;padding:4px 0}
+        .accounts-table td:before{
+          content:attr(data-label);display:block;
+          font-size:.7rem;font-weight:600;text-transform:uppercase;
+          color:var(--dim);margin-bottom:2px;
+        }
       }
     </style>
   </head>
   <body>
-    <div class=\"shell\">
-      <div class=\"top\">
-        <div class=\"top-row\">
-          <div>
-            <h1>Codex Auth Manager</h1>
-            <div class=\"subtitle\">Codex CLI login plus codex-switch profile orchestration</div>
-          </div>
-          <div class=\"toolbar\">
-            <button id=\"addAccount\" class=\"primary\" type=\"button\">Add account</button>
-            <button id=\"importCurrent\" type=\"button\">Import current auth</button>
-            <button id=\"refreshAll\" type=\"button\">Refresh</button>
-          </div>
-        </div>
-        <div class=\"token-box\">
-          <input id=\"tokenInput\" type=\"password\" placeholder=\"Bearer token\" />
-          <button id=\"tokenSave\" type=\"button\">Save token</button>
-          <button id=\"tokenClear\" type=\"button\">Clear</button>
-        </div>
+
+    <!-- NAV -->
+    <nav class="navbar">
+      <div class="nav-brand"><span class="dot"></span> Auth Manager</div>
+      <div class="nav-actions">
+        <button id="addAccount" class="btn btn-primary" type="button">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          Add Account
+        </button>
+        <button id="importCurrent" class="btn" type="button">Import Current</button>
+        <button id="refreshAll" class="btn btn-icon" type="button" title="Refresh">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
+      </div>
+    </nav>
+
+    <div class="page">
+      <!-- TOKEN BAR -->
+      <div class="token-bar">
+        <input id="tokenInput" type="password" placeholder="Enter your API bearer token to unlock account management..." />
+        <button id="tokenSave" class="btn btn-primary btn-sm" type="button">Apply</button>
+        <button id="tokenClear" class="btn btn-sm" type="button">Clear</button>
       </div>
 
-      <div class=\"card status-grid\">
-        <div>
-          <div class=\"status-title\">Accounts Managed</div>
-          <div class=\"status-value\" id=\"accountsManaged\">--</div>
-        </div>
-        <div>
-          <div class=\"status-title\">Profiles With Token</div>
-          <div class=\"status-value\" id=\"profilesWithTokens\">--</div>
-        </div>
-        <div>
-          <div class=\"status-title\">Login Status</div>
-          <div class=\"status-value\" id=\"loginStatus\">idle</div>
-        </div>
-        <div>
-          <div class=\"status-title\">Auth File Updated</div>
-          <div class=\"status-value\" id=\"authUpdatedAt\">--</div>
-        </div>
-        <div>
-          <div class=\"status-title\">Session Requests</div>
-          <div class=\"status-value\" id=\"sessionRequests\">--</div>
-        </div>
-        <div>
-          <div class=\"status-title\">Session Tokens</div>
-          <div class=\"status-value\" id=\"sessionTokens\">--</div>
-        </div>
-      </div>
+      <div id="statusNote"></div>
 
-      <div id=\"statusNote\" class=\"status-note\"></div>
-      <div id=\"accounts\" class=\"grid\"></div>
+      <!-- TWO COLUMN LAYOUT -->
+      <div class="two-col">
+
+        <!-- LEFT: SIDEBAR -->
+        <aside class="sidebar">
+          <div class="panel">
+            <div class="panel-title">System Overview</div>
+            <div class="kv-list">
+              <div class="kv-item">
+                <div class="kv-label">Accounts Managed</div>
+                <div class="kv-value" id="accountsManaged">--</div>
+              </div>
+              <div class="kv-item">
+                <div class="kv-label">Profiles with Token</div>
+                <div class="kv-value" id="profilesWithTokens">--</div>
+              </div>
+              <div class="kv-item">
+                <div class="kv-label">Login Status</div>
+                <div class="kv-value" id="loginStatus"><span class="status-dot green"></span> Idle</div>
+              </div>
+              <div class="kv-item">
+                <div class="kv-label">Auth File Updated</div>
+                <div class="kv-value small" id="authUpdatedAt">--</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-title">Aggregated Usage</div>
+            <div class="kv-list">
+              <div class="kv-item">
+                <div class="kv-label">Cluster 5HR Usage</div>
+                <div class="kv-value small" id="agg5Hr">
+                  <div class="limit-bar-track"><div class="limit-bar-fill" style="width:0%"></div></div>
+                </div>
+              </div>
+              <div class="kv-item">
+                <div class="kv-label">Cluster Weekly Usage</div>
+                <div class="kv-value small" id="aggWeekly">
+                  <div class="limit-bar-track"><div class="limit-bar-fill" style="width:0%"></div></div>
+                </div>
+              </div>
+              <div class="kv-item">
+                <div class="kv-label">Recommended Profile</div>
+                <div class="kv-value small" id="recProfile">--</div>
+              </div>
+            </div>
+          </div>
+        </aside>
+
+        <!-- RIGHT: MAIN -->
+        <main>
+          <div class="panel" style="padding:0;overflow:hidden">
+            <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between">
+              <div class="panel-title" style="margin:0">Saved Profiles</div>
+              <span class="pill" id="accountCount">0 accounts</span>
+            </div>
+            <div id="accounts"></div>
+          </div>
+        </main>
+      </div>
     </div>
 
     <script>
-      const accountsEl = document.getElementById("accounts");
-      const statusNoteEl = document.getElementById("statusNote");
-      const tokenInput = document.getElementById("tokenInput");
-      const accountsManagedEl = document.getElementById("accountsManaged");
-      const profilesWithTokensEl = document.getElementById("profilesWithTokens");
-      const loginStatusEl = document.getElementById("loginStatus");
-      const authUpdatedAtEl = document.getElementById("authUpdatedAt");
-      const sessionRequestsEl = document.getElementById("sessionRequests");
-      const sessionTokensEl = document.getElementById("sessionTokens");
+      const $ = id => document.getElementById(id);
+      const accountsEl = $("accounts");
+      const statusNoteEl = $("statusNote");
+      const tokenInput = $("tokenInput");
+      const accountsManagedEl = $("accountsManaged");
+      const profilesWithTokensEl = $("profilesWithTokens");
+      const loginStatusEl = $("loginStatus");
+      const authUpdatedAtEl = $("authUpdatedAt");
+      const accountCountEl = $("accountCount");
 
-      function getToken() {
-        return (localStorage.getItem("internalToken") || "").trim();
-      }
+      const getToken = () => (localStorage.getItem("internalToken") || "").trim();
 
       function setStatus(text, warn = false) {
         statusNoteEl.textContent = text || "";
-        statusNoteEl.className = warn ? "status-note warn" : "status-note";
+        statusNoteEl.className = text ? ("show " + (warn ? "warn" : "ok")) : "";
       }
 
       function authHeaders() {
-        const token = getToken();
-        return token ? { "Authorization": "Bearer " + token } : {};
+        const t = getToken();
+        return t ? { Authorization: "Bearer " + t } : {};
       }
 
-      async function apiFetch(url, options = {}) {
-        const headers = {
-          "Content-Type": "application/json",
-          ...authHeaders(),
-          ...(options.headers || {}),
-        };
-        return fetch(url, { ...options, headers });
+      async function apiFetch(url, opts = {}) {
+        return fetch(url, {
+          ...opts,
+          headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts.headers || {}) },
+        });
       }
 
       async function readError(res, fallback) {
         const raw = await res.text();
         try {
-          const data = JSON.parse(raw);
-          if (typeof data.detail === "string") {
-            return data.detail;
-          }
-          if (data.detail && typeof data.detail.message === "string") {
-            return data.detail.message;
-          }
-          if (typeof data.message === "string") {
-            return data.message;
-          }
-        } catch (_err) {
-          // Fall through to raw text.
-        }
+          const d = JSON.parse(raw);
+          if (typeof d.detail === "string") return d.detail;
+          if (d.detail?.message) return d.detail.message;
+          if (typeof d.message === "string") return d.message;
+        } catch (_) {}
         return raw || fallback;
       }
 
-      function renderLimit(title, data, extraClass) {
-        if (!data) {
-          return `<div class="limit-row"><div><div class="limit-title">${title}</div><div class="limit-sub">No data</div></div><div class="percent ${extraClass}">--</div></div>`;
-        }
-        const percent = (
-          data.percent === null || data.percent === undefined
-            ? (data.usedPercent === null || data.usedPercent === undefined ? "--" : data.usedPercent + "%")
-            : data.percent + "%"
-        );
-        const remaining = data.remaining ?? "--";
-        const limit = data.limit ?? "--";
-        const reset = data.reset
-          ? `Reset ${data.reset}`
-          : (data.windowDurationMins ? `Window ${data.windowDurationMins}m` : "Reset unknown");
-        return `<div class="limit-row"><div><div class="limit-title">${title}</div><div class="limit-sub">${remaining} / ${limit} | ${reset}</div></div><div class="percent ${extraClass}">${percent}</div></div>`;
+      /* ── human-readable helpers ─────────── */
+      function humanDate(isoStr) {
+        if (!isoStr || isoStr === "--") return "--";
+        try {
+          const d = new Date(isoStr);
+          if (isNaN(d)) return isoStr;
+          const now = new Date();
+          const diffMs = now - d;
+          const diffMin = Math.floor(diffMs / 60000);
+          if (diffMin < 1) return "Just now";
+          if (diffMin < 60) return diffMin + " min ago";
+          const diffHr = Math.floor(diffMin / 60);
+          if (diffHr < 24) return diffHr + "h ago";
+          return d.toLocaleDateString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+        } catch (_) { return isoStr; }
       }
 
-      function renderCard(account) {
-        const badge = account.is_current ? `<div class="pill active">Current</div>` : `<div class="pill">Saved</div>`;
-        const email = account.email ? account.email : "email unavailable";
-        const displayLabel = account.display_label || account.label;
-        const rate = account.rate_limits || {};
-        const fiveHour = rate.requests || rate.primary || null;
-        const sevenDay = rate.tokens || rate.secondary || null;
-        return `<div class="card" data-label="${account.label}">
-          <div class="account-head">
-            <div>
-              <div class="label">${displayLabel}</div>
-              <div class="email">${email}</div>
-            </div>
-            ${badge}
-          </div>
-          <div class="actions">
-            <button type="button" data-action="switch" data-label="${account.label}">Switch</button>
-            <button type="button" data-action="export" data-label="${account.label}">Export</button>
-          </div>
-          ${renderLimit("5hr Limit", fiveHour, "")}
-          ${renderLimit("7 Day Limit", sevenDay, "alt")}
+      function statusDot(status) {
+        const s = (status || "").toLowerCase();
+        if (s === "idle" || s === "ok") return '<span class="status-dot green"></span>';
+        if (s.includes("wait") || s.includes("pending")) return '<span class="status-dot amber"></span>';
+        if (s.includes("error") || s.includes("fail")) return '<span class="status-dot red"></span>';
+        return '<span class="status-dot green"></span>';
+      }
+
+      /* ── render helpers ─────────────────── */
+      function limitBar(label, data) {
+        if (!data) return "";
+        const pct = data.percent ?? data.usedPercent ?? null;
+        const remaining = data.remaining ?? "--";
+        const limit = data.limit ?? "--";
+        const fillPct = pct !== null ? Math.min(100, Math.max(0, pct)) : 0;
+        const cls = fillPct > 85 ? "danger" : fillPct > 60 ? "warn" : "ok";
+        const pctText = pct !== null ? fillPct + "%" : "--";
+        return `<div class="limit-bar-row">
+          <span class="limit-bar-label">${label}</span>
+          <div class="limit-bar-track"><div class="limit-bar-fill ${cls}" style="width:${fillPct}%"></div></div>
+          <span class="limit-bar-text">${pctText}</span>
         </div>`;
       }
 
-      function formatLimitInline(limit) {
-        if (!limit || typeof limit !== "object") {
-          return "--";
-        }
-        const remaining = limit.remaining ?? limit.remainingRequests ?? limit.remainingTokens;
-        const max = limit.limit ?? limit.max ?? limit.total;
-        if (remaining !== undefined && max !== undefined) {
-          return `${remaining} / ${max}`;
-        }
-        if (limit.usedPercent !== undefined) {
-          const pct = `${limit.usedPercent}% used`;
-          const mins = limit.windowDurationMins !== undefined ? ` / ${limit.windowDurationMins}m` : "";
-          return pct + mins;
-        }
-        if (remaining !== undefined) {
-          return `${remaining}`;
-        }
-        if (max !== undefined) {
-          return `-- / ${max}`;
-        }
-        return "--";
+      function renderCard(account) {
+        const isActive = account.is_current;
+        const displayLabel = account.display_label || account.label;
+        const email = account.email || "—";
+        const rate = account.rate_limits || {};
+        const prim = rate.requests || rate.primary || null;
+        const sec = rate.tokens || rate.secondary || null;
+        const limitsHtml = (prim || sec)
+          ? `<div class="limit-bar-wrap">${limitBar("Requests", prim)}${limitBar("Tokens", sec)}</div>`
+          : '<span style="color:var(--dim);font-size:.8rem">No limit data</span>';
+
+        return `<tr>
+          <td data-label="Profile"><div class="acct-name">${displayLabel}</div><div class="acct-email">${email}</div></td>
+          <td data-label="Status"><span class="pill ${isActive ? "active" : ""}">${isActive ? "Active" : "Saved"}</span></td>
+          <td data-label="Rate Limits">${limitsHtml}</td>
+          <td data-label="Actions"><div class="acct-actions">
+            <button class="btn btn-sm ${isActive ? "" : "btn-primary"}" type="button" data-action="switch" data-label="${account.label}">${isActive ? "Current" : "Switch"}</button>
+            <button class="btn btn-sm btn-icon" type="button" data-action="export" data-label="${account.label}" title="Export">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            </button>
+          </div></td>
+        </tr>`;
       }
 
-      function parseSessionLimits(payload) {
-        if (!payload || typeof payload !== "object") {
-          return { requests: null, tokens: null };
-        }
-        if (payload.requests || payload.tokens) {
-          return {
-            requests: payload.requests || null,
-            tokens: payload.tokens || null,
-          };
-        }
-        if (payload.rateLimits && typeof payload.rateLimits === "object") {
-          return parseSessionLimits(payload.rateLimits);
-        }
-        if (payload.primary || payload.secondary) {
-          return {
-            requests: payload.primary || null,
-            tokens: payload.secondary || null,
-          };
-        }
-        if (Array.isArray(payload.limits)) {
-          let requests = null;
-          let tokens = null;
-          for (const entry of payload.limits) {
-            if (!entry || typeof entry !== "object") continue;
-            const name = String(entry.name || entry.type || "").toLowerCase();
-            if (!requests && name.includes("request")) requests = entry;
-            if (!tokens && name.includes("token")) tokens = entry;
-          }
-          return { requests, tokens };
-        }
-        return { requests: null, tokens: null };
+      function wrapTable(rows) {
+        return `<table class="accounts-table">
+          <thead><tr><th>Profile</th><th>Status</th><th>Rate Limits</th><th style="width:140px">Actions</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
       }
 
+      function emptyState(msg) {
+        return `<div class="empty-state"><div class="empty-icon">📂</div><p>${msg}</p></div>`;
+      }
+
+      /* ── data loaders ───────────────────── */
       async function loadPublicStats() {
         try {
           const res = await fetch("/api/public-stats");
           const data = await res.json();
           accountsManagedEl.textContent = (data.accounts_managed ?? "--").toString();
           profilesWithTokensEl.textContent = (data.profiles_with_tokens ?? "--").toString();
-          loginStatusEl.textContent = data.login_status || "idle";
-          authUpdatedAtEl.textContent = data.auth_file?.modified_at || "--";
-        } catch (_err) {
+          const status = data.login_status || "idle";
+          loginStatusEl.innerHTML = statusDot(status) + " " + status.charAt(0).toUpperCase() + status.slice(1);
+          authUpdatedAtEl.textContent = humanDate(data.auth_file?.modified_at);
+        } catch (_) {
           accountsManagedEl.textContent = "--";
           profilesWithTokensEl.textContent = "--";
-          loginStatusEl.textContent = "unknown";
+          loginStatusEl.innerHTML = '<span class="status-dot amber"></span> Unknown';
           authUpdatedAtEl.textContent = "--";
-        }
-      }
-
-      async function loadSessionRateLimits() {
-        sessionRequestsEl.textContent = "--";
-        sessionTokensEl.textContent = "--";
-        try {
-          const res = await apiFetch("/auth/rate-limits", { method: "GET" });
-          if (res.status === 401 || res.status === 403) {
-            return;
-          }
-          if (!res.ok) {
-            const msg = await readError(res, "Failed to read session limits");
-            setStatus(msg, true);
-            return;
-          }
-          const data = await res.json();
-          const parsed = parseSessionLimits(data.rate_limits || data);
-          sessionRequestsEl.textContent = formatLimitInline(parsed.requests);
-          sessionTokensEl.textContent = formatLimitInline(parsed.tokens);
-        } catch (_err) {
-          sessionRequestsEl.textContent = "--";
-          sessionTokensEl.textContent = "--";
         }
       }
 
@@ -1605,133 +1652,102 @@ def _render_index() -> str:
         try {
           const res = await apiFetch("/api/accounts", { method: "GET" });
           if (res.status === 401 || res.status === 403) {
-            accountsEl.innerHTML = `<div class="card">Bearer token required for account actions.</div>`;
+            accountsEl.innerHTML = emptyState("Enter your bearer token above to manage accounts.");
+            accountCountEl.textContent = "locked";
+            $("agg5Hr").innerHTML = "--";
+            $("aggWeekly").innerHTML = "--";
+            $("recProfile").innerHTML = "--";
             return;
           }
           const data = await res.json();
           const accounts = data.accounts || [];
+          accountCountEl.textContent = accounts.length + " account" + (accounts.length !== 1 ? "s" : "");
           if (!accounts.length) {
-            accountsEl.innerHTML = `<div class="card">No saved profiles yet.</div>`;
+            accountsEl.innerHTML = emptyState("No saved profiles yet.<br>Click <strong>Add Account</strong> or <strong>Import Current</strong> to get started.");
+            $("agg5Hr").innerHTML = "--";
+            $("aggWeekly").innerHTML = "--";
+            $("recProfile").innerHTML = "--";
             return;
           }
-          accountsEl.innerHTML = accounts.map(renderCard).join("");
-        } catch (_err) {
-          accountsEl.innerHTML = `<div class="card">Failed to load accounts.</div>`;
+
+          let sum5Hr = 0, sumWeekly = 0;
+          let rec = accounts[0];
+          let minUsed = 999;
+          
+          for (const a of accounts) {
+            let p = a.rate_limits?.primary?.usedPercent ?? a.rate_limits?.requests?.usedPercent ?? 0;
+            let s = a.rate_limits?.secondary?.usedPercent ?? a.rate_limits?.tokens?.usedPercent ?? 0;
+            sum5Hr += p;
+            sumWeekly += s;
+            if ((p + s) < minUsed) { minUsed = p + s; rec = a; }
+          }
+          
+          let avg5Hr = Math.round(sum5Hr / accounts.length);
+          let avgWeekly = Math.round(sumWeekly / accounts.length);
+          
+          $("agg5Hr").innerHTML = limitBar("5HR", {percent: avg5Hr}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avg5Hr}% remaining across cluster</div>`;
+          $("aggWeekly").innerHTML = limitBar("WEEKLY", {percent: avgWeekly}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avgWeekly}% remaining across cluster</div>`;
+          $("recProfile").innerHTML = `<span class="pill active" style="cursor:pointer" onclick="document.querySelector('[data-action=\\'switch\\'][data-label=\\'${rec.label}\\']').click()">Switch to <b>${rec.display_label || rec.label}</b></span>`;
+
+          accountsEl.innerHTML = wrapTable(accounts.map(renderCard).join(""));
+        } catch (_) {
+          accountsEl.innerHTML = emptyState("Failed to load accounts.");
+          $("agg5Hr").innerHTML = "--";
+          $("aggWeekly").innerHTML = "--";
+          $("recProfile").innerHTML = "--";
         }
       }
 
       async function startLogin() {
         const res = await apiFetch("/auth/login/start", { method: "POST", body: "{}" });
-        if (!res.ok) {
-          throw new Error(await readError(res, "Unable to start login"));
-        }
+        if (!res.ok) throw new Error(await readError(res, "Unable to start login"));
         const data = await res.json();
         setStatus(data.instructions || "Login started.");
         await loadPublicStats();
       }
 
       async function importCurrent() {
-        const requestedLabel = window.prompt("Optional label (leave empty for derived label):", "");
-        const body = requestedLabel && requestedLabel.trim() ? { label: requestedLabel.trim() } : {};
+        const lbl = window.prompt("Optional label (leave empty for auto):", "");
+        const body = lbl && lbl.trim() ? { label: lbl.trim() } : {};
         const res = await apiFetch("/auth/import-current", { method: "POST", body: JSON.stringify(body) });
-        if (!res.ok) {
-          throw new Error(await readError(res, "Import failed"));
-        }
+        if (!res.ok) throw new Error(await readError(res, "Import failed"));
         const data = await res.json();
-        setStatus(`Imported current auth as '${data.label}'`);
+        setStatus("Imported current auth as '" + data.label + "'");
       }
 
       async function switchProfile(label) {
-        const res = await apiFetch("/auth/switch", {
-          method: "POST",
-          body: JSON.stringify({ label }),
-        });
-        if (!res.ok) {
-          throw new Error(await readError(res, "Switch failed"));
-        }
-        setStatus(`Switched to '${label}'`);
+        const res = await apiFetch("/auth/switch", { method: "POST", body: JSON.stringify({ label }) });
+        if (!res.ok) throw new Error(await readError(res, "Switch failed"));
+        setStatus("Switched to '" + label + "'");
       }
 
       async function exportProfile(label) {
-        const res = await apiFetch(`/auth/export?label=${encodeURIComponent(label)}`, { method: "GET" });
-        if (!res.ok) {
-          throw new Error(await readError(res, "Export failed"));
-        }
+        const res = await apiFetch("/auth/export?label=" + encodeURIComponent(label), { method: "GET" });
+        if (!res.ok) throw new Error(await readError(res, "Export failed"));
         const data = await res.json();
         const blob = new Blob([JSON.stringify(data.auth_json, null, 2)], { type: "application/json" });
-        const href = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = href;
-        link.download = `${label}-auth.json`;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(href);
-        setStatus(`Exported '${label}'`);
+        const a = Object.assign(document.createElement("a"), { href: URL.createObjectURL(blob), download: label + "-auth.json" });
+        document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+        setStatus("Exported '" + label + "'");
       }
 
-      async function refreshAll() {
-        await Promise.all([loadPublicStats(), loadSessionRateLimits(), loadAccounts()]);
-      }
+      const refreshAll = () => Promise.all([loadPublicStats(), loadAccounts()]);
 
-      document.getElementById("tokenSave").addEventListener("click", async () => {
-        localStorage.setItem("internalToken", tokenInput.value.trim());
-        await refreshAll();
-      });
-
-      document.getElementById("tokenClear").addEventListener("click", async () => {
-        localStorage.removeItem("internalToken");
-        tokenInput.value = "";
-        await refreshAll();
-      });
-
-      document.getElementById("addAccount").addEventListener("click", async () => {
+      $("tokenSave").addEventListener("click", async () => { localStorage.setItem("internalToken", tokenInput.value.trim()); await refreshAll(); });
+      $("tokenClear").addEventListener("click", async () => { localStorage.removeItem("internalToken"); tokenInput.value = ""; await refreshAll(); });
+      $("addAccount").addEventListener("click", async () => { try { await startLogin(); } catch (e) { setStatus(e.message, true); } });
+      $("importCurrent").addEventListener("click", async () => { try { await importCurrent(); await refreshAll(); } catch (e) { setStatus(e.message, true); } });
+      $("refreshAll").addEventListener("click", refreshAll);
+      accountsEl.addEventListener("click", async e => {
+        const t = e.target.closest("[data-action]"); if (!t) return;
+        const action = t.dataset.action, label = t.dataset.label; if (!action || !label) return;
         try {
-          await startLogin();
-        } catch (err) {
-          setStatus(err.message || "Login start failed", true);
-        }
+          if (action === "switch") { await switchProfile(label); await refreshAll(); }
+          else if (action === "export") { await exportProfile(label); }
+        } catch (err) { setStatus(err.message, true); }
       });
-
-      document.getElementById("importCurrent").addEventListener("click", async () => {
-        try {
-          await importCurrent();
-          await refreshAll();
-        } catch (err) {
-          setStatus(err.message || "Import failed", true);
-        }
-      });
-
-      document.getElementById("refreshAll").addEventListener("click", refreshAll);
-
-      accountsEl.addEventListener("click", async (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLElement)) {
-          return;
-        }
-        const action = target.getAttribute("data-action");
-        const label = target.getAttribute("data-label");
-        if (!action || !label) {
-          return;
-        }
-
-        try {
-          if (action === "switch") {
-            await switchProfile(label);
-            await refreshAll();
-          } else if (action === "export") {
-            await exportProfile(label);
-          }
-        } catch (err) {
-          setStatus(err.message || "Action failed", true);
-        }
-      });
-
       refreshAll();
-      setInterval(async () => {
-        await loadPublicStats();
-        await loadSessionRateLimits();
-      }, 15000);
+      setInterval(() => { loadPublicStats(); if(getToken()) loadAccounts(); }, 15000);
     </script>
   </body>
 </html>"""
