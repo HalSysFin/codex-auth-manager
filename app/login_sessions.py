@@ -71,6 +71,22 @@ def get_latest_session() -> LoginSession | None:
         return session
 
 
+def cancel_login_session(session_id: str | None = None) -> bool:
+    global _LATEST_SESSION_ID
+    with _LOCK:
+        if session_id:
+            removed = _SESSIONS.pop(session_id, None)
+            if _LATEST_SESSION_ID == session_id:
+                _LATEST_SESSION_ID = None
+            return removed is not None
+
+        if _LATEST_SESSION_ID is None:
+            return False
+        removed = _SESSIONS.pop(_LATEST_SESSION_ID, None)
+        _LATEST_SESSION_ID = None
+        return removed is not None
+
+
 def validate_relay_token(session: LoginSession, token: str) -> bool:
     return secrets.compare_digest(session.relay_token, token)
 

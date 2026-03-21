@@ -128,6 +128,7 @@ CODEX_SWITCH_BIN=codex-switch
 CODEX_AUTH_PATH=~/.codex/auth.json
 CALLBACK_STORE_DIR=~/.codex-switch/callbacks
 CODEX_PROFILES_DIR=~/.codex-switch/profiles
+USAGE_DB_PATH=~/.codex-switch/auth-manager.sqlite3
 LOGIN_SESSION_TTL_SECONDS=600
 WEB_LOGIN_USERNAME=
 WEB_LOGIN_PASSWORD=
@@ -158,6 +159,7 @@ Container defaults:
 - `CODEX_AUTH_PATH=/root/.codex/auth.json`
 - `CALLBACK_STORE_DIR=/root/.codex-switch/callbacks`
 - `CODEX_PROFILES_DIR=/root/.codex-switch/profiles`
+- `USAGE_DB_PATH=/root/.codex-switch/auth-manager.sqlite3`
 
 Persistent volumes:
 - `/root/.codex`

@@ -5,7 +5,9 @@ import ipaddress
 import json
 import logging
 import secrets
+import asyncio
 from hashlib import sha256
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,16 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from .accounts import AccountProfile, list_profiles
+from .account_usage_store import (
+    delete_account_data,
+    ensure_account,
+    get_account,
+    initialize_usage_store,
+    list_usage_rollovers,
+    record_account_usage,
+    reconcile_due_accounts,
+    sync_account_usage_snapshot,
+)
 from .auth_store import (
     AuthStoreError,
     persist_and_save_label,
@@ -24,6 +36,7 @@ from .auth_store import (
 )
 from .codex_cli import (
     CodexCLIError,
+    cancel_login,
     derive_label,
     extract_email,
     get_login_status,
@@ -41,6 +54,7 @@ from .codex_switch import (
 )
 from .config import settings
 from .login_sessions import (
+    cancel_login_session,
     create_login_session,
     get_latest_session,
     get_login_session,
@@ -52,6 +66,37 @@ from .login_sessions import (
 
 app = FastAPI(title="Codex Auth Manager", version="0.2.0")
 logger = logging.getLogger(__name__)
+_RECONCILE_INTERVAL_SECONDS = 600
+_reconcile_task: asyncio.Task[None] | None = None
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    initialize_usage_store()
+    global _reconcile_task
+    if _reconcile_task is None:
+        _reconcile_task = asyncio.create_task(_periodic_reconcile_usage_windows())
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    global _reconcile_task
+    if _reconcile_task is not None:
+        _reconcile_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _reconcile_task
+        _reconcile_task = None
+
+
+async def _periodic_reconcile_usage_windows() -> None:
+    while True:
+        await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
+        try:
+            refreshed = reconcile_due_accounts(now=datetime.now(timezone.utc))
+            if refreshed:
+                logger.info("usage reconciliation refreshed %s account window(s)", refreshed)
+        except Exception:
+            logger.exception("usage reconciliation failed")
 
 
 @app.middleware("http")
@@ -136,6 +181,16 @@ async def index() -> HTMLResponse:
 @app.get("/ui")
 async def ui() -> HTMLResponse:
     return HTMLResponse(_render_index())
+
+
+@app.get("/ui/accounts/{label}")
+async def ui_account_usage(label: str) -> HTMLResponse:
+    return HTMLResponse(_render_account_usage_page(label))
+
+
+@app.get("/ui/stats")
+async def ui_usage_stats() -> HTMLResponse:
+    return HTMLResponse(_render_usage_stats_page())
 
 
 @app.get("/oauth/callback")
@@ -301,6 +356,21 @@ async def auth_login_status(wait_seconds: int = 0, session_id: str | None = None
     )
 
 
+@app.post("/auth/login/cancel")
+async def auth_login_cancel(request: Request, payload: dict[str, Any] | None = None) -> JSONResponse:
+    _require_internal_auth(request)
+    session_id = str((payload or {}).get("session_id", "")).strip() or None
+    session_canceled = cancel_login_session(session_id)
+    process_canceled = cancel_login()
+    return JSONResponse(
+        {
+            "status": "canceled",
+            "session_canceled": session_canceled,
+            "process_canceled": process_canceled,
+        }
+    )
+
+
 @app.post("/auth/relay-callback")
 async def auth_relay_callback(payload: dict[str, Any]) -> JSONResponse:
     session_id = str(payload.get("session_id", "")).strip()
@@ -390,11 +460,16 @@ async def import_current_auth(request: Request, payload: dict[str, Any] | None =
 
     email = extract_email(auth_json)
     existing = set(list_labels())
+    profiles = _dedupe_profiles(list_profiles())
+    matched_profile = _find_matching_profile(profiles, auth_json, email)
 
     if desired_label:
         label = str(desired_label).strip()
         if not label:
             raise HTTPException(status_code=400, detail="label cannot be empty")
+    elif matched_profile is not None:
+        # Keep a stable profile label for the same underlying account/auth.
+        label = matched_profile.label
     else:
         label = derive_label(email or "account", existing_labels=existing)
 
@@ -405,11 +480,14 @@ async def import_current_auth(request: Request, payload: dict[str, Any] | None =
     except (AuthStoreError, CodexSwitchError) as exc:
         raise _to_switch_http_error(exc) from exc
 
+    _touch_account_usage(profile_label=label, profile_email=email)
+
     return JSONResponse(
         {
             "status": "imported",
             "label": label,
             "email": email,
+            "matched_existing_profile": bool(matched_profile is not None),
             "saved": True,
             "codex_switch": {
                 "command": switch_save.command,
@@ -430,6 +508,7 @@ async def auth_switch(request: Request, payload: dict[str, Any]) -> JSONResponse
     try:
         result = switch_label(label)
         now_current = _resolve_current_label(read_current_auth(), list_profiles())
+        _touch_account_usage(profile_label=label, profile_email=None)
     except CodexSwitchError as exc:
         raise _to_switch_http_error(exc) from exc
     except CodexCLIError:
@@ -447,6 +526,26 @@ async def auth_switch(request: Request, payload: dict[str, Any]) -> JSONResponse
             },
         }
     )
+
+
+@app.post("/auth/delete")
+async def auth_delete(request: Request, payload: dict[str, Any]) -> JSONResponse:
+    _require_internal_auth(request)
+    label = str(payload.get("label", "")).strip()
+    if not label:
+        raise HTTPException(status_code=400, detail="label is required")
+
+    profile_path = settings.profiles_dir() / f"{label}.json"
+    if not profile_path.exists():
+        raise HTTPException(status_code=404, detail="Label not found")
+
+    try:
+        profile_path.unlink()
+        delete_account_data(label)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to delete profile: {exc}") from exc
+
+    return JSONResponse({"status": "deleted", "label": label})
 
 
 @app.get("/auth/current")
@@ -498,12 +597,37 @@ async def auth_rate_limits(request: Request) -> JSONResponse:
     except CodexCLIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    profiles = list_profiles()
+    current_label = None
+    current_email = None
+    try:
+        auth_json = read_current_auth()
+        current_label = _resolve_current_label(auth_json, profiles)
+        if current_label:
+            current_profile = next((p for p in profiles if p.label == current_label), None)
+            current_email = current_profile.email if current_profile else None
+            _touch_account_usage(profile_label=current_label, profile_email=current_email)
+            snapshot = _extract_limit_snapshot(result.rate_limits)
+            sync_account_usage_snapshot(
+                current_label,
+                usage_limit=snapshot["usage_limit"],
+                usage_used=snapshot["usage_used"],
+                rate_limit_window_type=snapshot["window_type"],
+                rate_limit_refresh_at=snapshot["refresh_at"],
+                provider_account_id=_account_provider_id(result.account),
+                name=_account_name(result.account, current_email),
+                now=datetime.now(timezone.utc),
+            )
+    except CodexCLIError:
+        current_label = None
+
     return JSONResponse(
         {
             "source": "codex_app_server",
             "account": result.account,
             "rate_limits": result.rate_limits,
             "notifications": result.notifications,
+            "current_label": current_label,
         }
     )
 
@@ -576,7 +700,8 @@ async def exchange_code(request: Request, payload: dict[str, Any]) -> JSONRespon
 @app.get("/api/accounts")
 async def api_accounts(request: Request) -> JSONResponse:
     _require_internal_auth(request)
-    profiles = list_profiles()
+    profiles = _dedupe_profiles(list_profiles())
+    _touch_profiles_usage(profiles)
 
     current = None
     try:
@@ -592,6 +717,8 @@ async def api_accounts(request: Request) -> JSONResponse:
             else:
                 rate_info = {"error": "No access token found"}
             probe_by_label[profile.label] = rate_info
+            if isinstance(rate_info, dict):
+                _sync_profile_usage_from_probe(profile, rate_info)
 
     session_by_label = _fetch_session_limits_for_profiles(
         profiles, baseline_auth=_safe_read_current_auth()
@@ -604,6 +731,7 @@ async def api_accounts(request: Request) -> JSONResponse:
             final_rate_info = rate_info
         else:
             final_rate_info = session_by_label.get(profile.label, rate_info)
+            _sync_profile_usage_from_session_limits(profile, final_rate_info)
 
         results.append(
             {
@@ -612,15 +740,103 @@ async def api_accounts(request: Request) -> JSONResponse:
                 "email": profile.email,
                 "is_current": profile.label == current,
                 "rate_limits": final_rate_info,
+                "usage_tracking": _usage_tracking_payload(profile.label),
             }
         )
 
     return JSONResponse({"accounts": results, "current_label": current})
 
 
+@app.get("/api/accounts/{label}/usage-history")
+async def api_account_usage_history(request: Request, label: str) -> JSONResponse:
+    _require_internal_auth(request)
+    profile = _profile_for_label(label)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Label not found")
+
+    # Try to refresh usage snapshot from live rate-limit probe for this profile.
+    if profile.access_token:
+        async with httpx.AsyncClient(timeout=10) as client:
+            rate_info = await _fetch_rate_limits(client, profile.access_token)
+        if isinstance(rate_info, dict):
+            _sync_profile_usage_from_probe(profile, rate_info)
+
+    _touch_account_usage(profile_label=profile.label, profile_email=profile.email)
+    usage = _usage_tracking_payload(profile.label)
+    rollovers = list_usage_rollovers(profile.label)
+    summary = _rollover_summary(rollovers, usage)
+
+    return JSONResponse(
+        {
+            "label": profile.label,
+            "display_label": _display_label(profile.label, profile.email),
+            "email": profile.email,
+            "usage_tracking": usage,
+            "rollovers": rollovers,
+            "summary": summary,
+        }
+    )
+
+
+@app.get("/api/usage/stats")
+async def api_usage_stats(request: Request) -> JSONResponse:
+    _require_internal_auth(request)
+    profiles = _dedupe_profiles(list_profiles())
+    _touch_profiles_usage(profiles)
+
+    per_account: list[dict[str, Any]] = []
+    all_rollovers: list[dict[str, Any]] = []
+    totals = {
+        "accounts": len(profiles),
+        "lifetime_used": 0,
+        "active_window_used": 0,
+        "active_window_limit": 0,
+        "total_wasted": 0,
+        "rollover_windows": 0,
+    }
+
+    for profile in profiles:
+        usage = _usage_tracking_payload(profile.label)
+        rollovers = list_usage_rollovers(profile.label)
+        summary = _rollover_summary(rollovers, usage)
+        all_rollovers.extend(rollovers)
+
+        totals["lifetime_used"] += int((usage or {}).get("lifetime_used") or 0)
+        totals["active_window_used"] += int((usage or {}).get("usage_in_window") or 0)
+        totals["active_window_limit"] += int((usage or {}).get("usage_limit") or 0)
+        totals["total_wasted"] += int(summary["total_wasted"])
+        totals["rollover_windows"] += int(summary["window_count"])
+
+        per_account.append(
+            {
+                "label": profile.label,
+                "display_label": _display_label(profile.label, profile.email),
+                "email": profile.email,
+                "usage_tracking": usage,
+                "summary": summary,
+            }
+        )
+
+    per_account.sort(
+        key=lambda item: (
+            int((item.get("usage_tracking") or {}).get("lifetime_used") or 0),
+            int((item.get("summary") or {}).get("total_wasted") or 0),
+        ),
+        reverse=True,
+    )
+
+    return JSONResponse(
+        {
+            "totals": totals,
+            "per_account": per_account,
+            "daily_rollover_trend": _daily_rollover_trend(all_rollovers),
+        }
+    )
+
+
 @app.get("/api/public-stats")
 async def api_public_stats() -> JSONResponse:
-    profiles = list_profiles()
+    profiles = _dedupe_profiles(list_profiles())
     auth_meta = _auth_file_metadata(settings.codex_auth_file())
     login = get_login_status()
 
@@ -1029,6 +1245,328 @@ def _parse_int(value: str | None) -> int | None:
         return None
 
 
+def _touch_profiles_usage(profiles: list[AccountProfile]) -> None:
+    now = datetime.now(timezone.utc)
+    for profile in profiles:
+        _touch_account_usage(
+            profile_label=profile.label,
+            profile_email=profile.email,
+            now=now,
+        )
+
+
+def _touch_account_usage(
+    *,
+    profile_label: str,
+    profile_email: str | None,
+    now: datetime | None = None,
+) -> None:
+    moment = now or datetime.now(timezone.utc)
+    try:
+        ensure_account(
+            profile_label,
+            moment,
+            provider_account_id=profile_email,
+            name=profile_email,
+            rate_limit_window_type=None,
+            usage_limit=None,
+        )
+        # Activity-driven refresh path; delta may be 0 when no concrete usage delta is known.
+        record_account_usage(profile_label, 0, now=moment)
+    except Exception:
+        logger.exception("Unable to touch usage account for label=%s", profile_label)
+
+
+def _sync_profile_usage_from_probe(profile: AccountProfile, rate_info: dict[str, Any]) -> None:
+    requests_data = rate_info.get("requests")
+    if not isinstance(requests_data, dict):
+        return
+    limit = requests_data.get("limit")
+    remaining = requests_data.get("remaining")
+    reset = requests_data.get("reset")
+    if not isinstance(limit, int) or not isinstance(remaining, int):
+        return
+    used = max(limit - remaining, 0)
+    refresh_at = _parse_probe_reset_to_iso(reset)
+    try:
+        sync_account_usage_snapshot(
+            profile.label,
+            usage_limit=limit,
+            usage_used=used,
+            rate_limit_window_type="daily",
+            rate_limit_refresh_at=refresh_at,
+            provider_account_id=profile.email,
+            name=profile.email,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception:
+        logger.exception("Unable to sync probe usage for label=%s", profile.label)
+
+
+def _sync_profile_usage_from_session_limits(profile: AccountProfile, rate_info: dict[str, Any]) -> None:
+    snapshot = _extract_limit_snapshot(rate_info)
+    if (
+        snapshot["usage_limit"] is None
+        and snapshot["usage_used"] is None
+        and snapshot["refresh_at"] is None
+    ):
+        return
+    try:
+        sync_account_usage_snapshot(
+            profile.label,
+            usage_limit=snapshot["usage_limit"],
+            usage_used=snapshot["usage_used"],
+            rate_limit_window_type=snapshot["window_type"],
+            rate_limit_refresh_at=snapshot["refresh_at"],
+            provider_account_id=profile.email,
+            name=profile.email,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception:
+        logger.exception("Unable to sync session usage for label=%s", profile.label)
+
+
+def _parse_probe_reset_to_iso(reset: Any) -> str | None:
+    if not isinstance(reset, str):
+        return None
+    raw = reset.strip()
+    if not raw:
+        return None
+    try:
+        # Common x-ratelimit reset format is relative durations (e.g. "15s", "1m").
+        suffix = raw[-1].lower()
+        value = int(raw[:-1])
+        multiplier = {"s": 1, "m": 60, "h": 3600}.get(suffix)
+        if multiplier is None:
+            return None
+        dt = datetime.now(timezone.utc).timestamp() + (value * multiplier)
+        return datetime.fromtimestamp(dt, tz=timezone.utc).isoformat()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _extract_limit_snapshot(rate_limits: Any) -> dict[str, Any]:
+    payload = rate_limits if isinstance(rate_limits, dict) else {}
+
+    primary = payload.get("primary") if isinstance(payload.get("primary"), dict) else None
+    secondary = payload.get("secondary") if isinstance(payload.get("secondary"), dict) else None
+    candidate = primary or secondary or payload
+
+    usage_limit = _find_int(candidate, {"limit", "max", "quota", "total"})
+    usage_used = _find_int(candidate, {"used", "consumed"})
+    if usage_used is None:
+        remaining = _find_int(candidate, {"remaining", "left"})
+        if usage_limit is not None and remaining is not None:
+            usage_used = max(usage_limit - remaining, 0)
+    refresh_at = _find_iso_datetime(
+        candidate, {"refresh_at", "reset_at", "next_reset_at", "resets_at"}
+    )
+    window_type = _find_str(candidate, {"window_type", "window", "period"}) or "daily"
+
+    return {
+        "usage_limit": usage_limit,
+        "usage_used": usage_used,
+        "refresh_at": refresh_at,
+        "window_type": window_type,
+    }
+
+
+def _find_int(payload: Any, keys: set[str]) -> int | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = key.lower().replace("-", "_")
+            if normalized in keys and isinstance(value, int):
+                return value
+            found = _find_int(value, keys)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_int(item, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _find_str(payload: Any, keys: set[str]) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = key.lower().replace("-", "_")
+            if normalized in keys and isinstance(value, str) and value.strip():
+                return value.strip()
+            found = _find_str(value, keys)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_str(item, keys)
+            if found:
+                return found
+    return None
+
+
+def _find_iso_datetime(payload: Any, keys: set[str]) -> str | None:
+    value = _find_str(payload, keys)
+    if not value:
+        return None
+    candidate = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
+def _account_provider_id(account_payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(account_payload, dict):
+        return None
+    for key in ["id", "account_id", "accountId", "user_id", "userId"]:
+        value = account_payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _account_name(account_payload: dict[str, Any] | None, fallback_email: str | None) -> str | None:
+    if isinstance(account_payload, dict):
+        for key in ["name", "display_name", "displayName", "email"]:
+            value = account_payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return fallback_email
+
+
+def _usage_tracking_payload(label: str) -> dict[str, Any] | None:
+    state = get_account(label)
+    if state is None:
+        return None
+    return {
+        "rate_limit_window_type": state.rate_limit_window_type,
+        "usage_limit": state.usage_limit,
+        "usage_in_window": state.usage_in_window,
+        "lifetime_used": state.lifetime_used,
+        "rate_limit_refresh_at": state.rate_limit_refresh_at,
+        "rate_limit_last_refreshed_at": state.rate_limit_last_refreshed_at,
+        "last_usage_sync_at": state.last_usage_sync_at,
+        "created_at": state.created_at,
+        "updated_at": state.updated_at,
+    }
+
+
+def _find_matching_profile(
+    profiles: list[AccountProfile],
+    auth_json: dict[str, Any],
+    email: str | None,
+) -> AccountProfile | None:
+    incoming_email = (email or "").strip().lower()
+    incoming_token = _extract_token(auth_json)
+    for profile in profiles:
+        profile_email = (profile.email or "").strip().lower()
+        if incoming_email and profile_email and incoming_email == profile_email:
+            return profile
+        if incoming_token and profile.access_token and incoming_token == profile.access_token:
+            return profile
+    return None
+
+
+def _dedupe_profiles(profiles: list[AccountProfile]) -> list[AccountProfile]:
+    deduped: dict[str, AccountProfile] = {}
+    try:
+        current_label_name = current_label()
+    except CodexSwitchError:
+        current_label_name = None
+    for profile in profiles:
+        key = _profile_identity_key(profile)
+        if key not in deduped:
+            deduped[key] = profile
+            continue
+        current = deduped[key]
+        # Prefer current active profile, otherwise keep latest by file mtime.
+        if current_label_name == profile.label:
+            deduped[key] = profile
+            continue
+        try:
+            if profile.path.stat().st_mtime > current.path.stat().st_mtime:
+                deduped[key] = profile
+        except OSError:
+            pass
+    return sorted(deduped.values(), key=lambda p: p.label)
+
+
+def _profile_identity_key(profile: AccountProfile) -> str:
+    email = (profile.email or "").strip().lower()
+    if email:
+        return f"email:{email}"
+    token = (profile.access_token or "").strip()
+    if token:
+        return f"token:{token}"
+    return f"label:{profile.label}"
+
+
+def _rollover_summary(rollovers: list[dict[str, Any]], usage: dict[str, Any] | None) -> dict[str, Any]:
+    total_wasted = sum(int(item.get("usage_wasted") or 0) for item in rollovers)
+    total_used_completed = sum(int(item.get("usage_used") or 0) for item in rollovers)
+    total_limit_completed = sum(int(item.get("usage_limit") or 0) for item in rollovers)
+    window_count = len(rollovers)
+    avg_completed_utilization_percent = None
+    if total_limit_completed > 0:
+        avg_completed_utilization_percent = round(
+            (total_used_completed / total_limit_completed) * 100, 2
+        )
+
+    current_limit = int((usage or {}).get("usage_limit") or 0)
+    current_used = int((usage or {}).get("usage_in_window") or 0)
+    current_wasted_if_rollover_now = max(current_limit - current_used, 0)
+
+    return {
+        "window_count": window_count,
+        "total_wasted": total_wasted,
+        "total_used_completed": total_used_completed,
+        "total_limit_completed": total_limit_completed,
+        "avg_completed_utilization_percent": avg_completed_utilization_percent,
+        "current_wasted_if_rollover_now": current_wasted_if_rollover_now,
+    }
+
+
+def _daily_rollover_trend(rollovers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, int]] = {}
+    for item in rollovers:
+        ended_at = str(item.get("window_ended_at") or "")
+        day = ended_at[:10]
+        if len(day) != 10:
+            continue
+        bucket = buckets.setdefault(
+            day,
+            {"usage_used": 0, "usage_wasted": 0, "usage_limit": 0, "windows": 0},
+        )
+        bucket["usage_used"] += int(item.get("usage_used") or 0)
+        bucket["usage_wasted"] += int(item.get("usage_wasted") or 0)
+        bucket["usage_limit"] += int(item.get("usage_limit") or 0)
+        bucket["windows"] += 1
+
+    points: list[dict[str, Any]] = []
+    for day in sorted(buckets.keys())[-60:]:
+        bucket = buckets[day]
+        utilization = None
+        if bucket["usage_limit"] > 0:
+            utilization = round((bucket["usage_used"] / bucket["usage_limit"]) * 100, 2)
+        points.append(
+            {
+                "day": day,
+                "usage_used": bucket["usage_used"],
+                "usage_wasted": bucket["usage_wasted"],
+                "usage_limit": bucket["usage_limit"],
+                "windows": bucket["windows"],
+                "utilization_percent": utilization,
+            }
+        )
+    return points
+
+
 def _profile_for_label(label: str) -> AccountProfile | None:
     wanted = label.strip()
     for profile in list_profiles():
@@ -1244,6 +1782,499 @@ def _render_login(next_path: str) -> str:
 </html>"""
 
 
+def _render_account_usage_page(label: str) -> str:
+    template = """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Account Usage History</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      :root{
+        --bg:#0A0A0A;--surface:#171717;--surface-hi:#202020;--border:#2B2B2B;
+        --text:#F1F5F9;--dim:#94A3B8;--green:#10B981;--amber:#F59E0B;--red:#EF4444;--blue:#38BDF8;
+      }
+      body{font-family:'Inter',system-ui,sans-serif;color:var(--text);background:var(--bg);min-height:100vh}
+      .wrap{max-width:1100px;margin:0 auto;padding:24px 18px 52px}
+      .top{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}
+      .title{font:700 1.55rem 'Outfit',sans-serif;letter-spacing:-.02em}
+      .sub{color:var(--dim);font-size:.9rem;margin-top:4px}
+      .actions{display:flex;gap:8px;flex-wrap:wrap}
+      .btn,.token-input{
+        height:38px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);
+      }
+      .btn{padding:0 14px;font-weight:600;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center}
+      .btn:hover{background:var(--surface-hi)}
+      .token-input{padding:0 12px;width:300px}
+      .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}
+      .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px}
+      .k{font-size:.73rem;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
+      .v{font:700 1.1rem 'Outfit',sans-serif}
+      .panel{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px;margin-top:12px}
+      .panel h2{font:600 1rem 'Outfit',sans-serif;margin-bottom:10px}
+      #status{margin:10px 0;color:var(--amber);font-size:.88rem}
+      #utilChart,#wasteChart{width:100%;height:210px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:6px}
+      table{width:100%;border-collapse:collapse}
+      th,td{padding:10px 8px;border-bottom:1px solid var(--border);text-align:left;font-size:.86rem}
+      th{color:var(--dim);text-transform:uppercase;font-size:.7rem;letter-spacing:.06em}
+      @media(max-width:940px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      @media(max-width:640px){.grid{grid-template-columns:1fr}.token-input{width:100%}}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <div class="title" id="pageTitle">Account Usage History</div>
+          <div class="sub" id="pageSub">Usage windows, rollover wastage, and sync history.</div>
+        </div>
+        <div class="actions">
+          <input id="tokenInput" class="token-input" type="password" placeholder="Bearer token" />
+          <button id="applyToken" class="btn" type="button">Apply Token</button>
+          <a class="btn" href="/ui/stats">Overall Stats</a>
+          <a class="btn" href="/ui">Back</a>
+        </div>
+      </div>
+      <div id="status"></div>
+
+      <div class="grid">
+        <div class="card"><div class="k">Current Window</div><div class="v" id="currentWindow">--</div></div>
+        <div class="card"><div class="k">Lifetime Used</div><div class="v" id="lifetimeUsed">--</div></div>
+        <div class="card"><div class="k">Total Wasted</div><div class="v" id="totalWasted">--</div></div>
+        <div class="card"><div class="k">Completed Windows</div><div class="v" id="windowCount">--</div></div>
+      </div>
+
+      <div class="panel">
+        <h2>Window Utilization Trend</h2>
+        <svg id="utilChart" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="panel">
+        <h2>Rollover Wastage Trend</h2>
+        <svg id="wasteChart" viewBox="0 0 1000 220" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="panel">
+        <h2>Rollover History</h2>
+        <div style="overflow:auto">
+          <table>
+            <thead><tr><th>Window Ended</th><th>Used</th><th>Limit</th><th>Wasted</th><th>Utilization</th><th>Rolled Over</th></tr></thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const ACCOUNT_LABEL = __ACCOUNT_LABEL__;
+      const $ = id => document.getElementById(id);
+      const statusEl = $("status");
+      const tokenInput = $("tokenInput");
+      const getToken = () => (localStorage.getItem("internalToken") || "").trim();
+      tokenInput.value = getToken();
+
+      function setStatus(msg) { statusEl.textContent = msg || ""; }
+      function authHeaders() {
+        const token = getToken();
+        return token ? { Authorization: "Bearer " + token } : {};
+      }
+
+      function pct(used, limit) {
+        if (!limit) return null;
+        return Math.max(0, Math.min(100, (used / limit) * 100));
+      }
+
+      function drawBars(svg, points, valueKey, color) {
+        const w = 1000, h = 220, pad = 26;
+        if (!points.length) { svg.innerHTML = ""; return; }
+        const maxVal = Math.max(...points.map(p => Number(p[valueKey] || 0)), 1);
+        const bw = (w - (pad * 2)) / points.length;
+        const bars = points.map((p, i) => {
+          const v = Number(p[valueKey] || 0);
+          const bh = ((h - (pad * 2)) * v) / maxVal;
+          const x = pad + (i * bw) + 2;
+          const y = h - pad - bh;
+          return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${Math.max(2, bw - 4).toFixed(2)}" height="${bh.toFixed(2)}" fill="${color}" opacity="0.86"></rect>`;
+        }).join("");
+        svg.innerHTML = `<line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="#334155" stroke-width="1"></line>${bars}`;
+      }
+
+      function renderHistoryRows(rollovers, usage) {
+        if (!rollovers.length) {
+          const used = Number((usage || {}).usage_in_window || 0);
+          const limit = Number((usage || {}).usage_limit || 0);
+          const utilization = limit > 0 ? ((used / limit) * 100) : null;
+          const nextReset = (usage || {}).rate_limit_refresh_at || "--";
+          const currentWaste = Math.max(limit - used, 0);
+          return `<tr>
+            <td>Active window (current)</td>
+            <td>${used.toLocaleString()}</td>
+            <td>${limit.toLocaleString()}</td>
+            <td>${currentWaste.toLocaleString()}</td>
+            <td>${utilization === null ? "--" : utilization.toFixed(1) + "%"}</td>
+            <td>${nextReset}</td>
+          </tr>`;
+        }
+        return rollovers.slice().reverse().map(r => {
+          const used = Number(r.usage_used || 0);
+          const limit = Number(r.usage_limit || 0);
+          const utilization = pct(used, limit);
+          return `<tr>
+            <td>${r.window_ended_at || "--"}</td>
+            <td>${used.toLocaleString()}</td>
+            <td>${limit.toLocaleString()}</td>
+            <td>${Number(r.usage_wasted || 0).toLocaleString()}</td>
+            <td>${utilization === null ? "--" : utilization.toFixed(1) + "%"}</td>
+            <td>${r.rolled_over_at || "--"}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      function drawHistoryCharts(rollovers, usage) {
+        if (rollovers.length) {
+          drawBars($("utilChart"), rollovers, "usage_used", "#10B981");
+          drawBars($("wasteChart"), rollovers, "usage_wasted", "#EF4444");
+          return;
+        }
+        const used = Number((usage || {}).usage_in_window || 0);
+        const limit = Number((usage || {}).usage_limit || 0);
+        const wasted = Math.max(limit - used, 0);
+        const synthetic = [{ usage_used: used, usage_wasted: wasted }];
+        drawBars($("utilChart"), synthetic, "usage_used", "#10B981");
+        drawBars($("wasteChart"), synthetic, "usage_wasted", "#EF4444");
+      }
+
+      async function loadUsageHistory() {
+        setStatus("");
+        try {
+          const res = await fetch(`/api/accounts/${encodeURIComponent(ACCOUNT_LABEL)}/usage-history`, {
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || "Failed to load history");
+          }
+          const data = await res.json();
+          $("pageTitle").textContent = (data.display_label || data.label || ACCOUNT_LABEL) + " usage history";
+          $("pageSub").textContent = data.email ? `Account: ${data.email}` : `Label: ${data.label}`;
+          const usage = data.usage_tracking || {};
+          const summary = data.summary || {};
+          const rollovers = data.rollovers || [];
+
+          const currentUsed = Number(usage.usage_in_window || 0);
+          const currentLimit = Number(usage.usage_limit || 0);
+          const currentPct = pct(currentUsed, currentLimit);
+          $("currentWindow").textContent = `${currentUsed.toLocaleString()} / ${currentLimit.toLocaleString()} (${currentPct === null ? "--" : currentPct.toFixed(1) + "%"})`;
+          $("lifetimeUsed").textContent = Number(usage.lifetime_used || 0).toLocaleString();
+          $("totalWasted").textContent = Number(summary.total_wasted || 0).toLocaleString();
+          $("windowCount").textContent = Number(summary.window_count || 0).toLocaleString();
+
+          drawHistoryCharts(rollovers, usage);
+          $("historyBody").innerHTML = renderHistoryRows(rollovers, usage);
+        } catch (err) {
+          setStatus(err.message || "Failed to load usage history.");
+        }
+      }
+
+      $("applyToken").addEventListener("click", () => {
+        localStorage.setItem("internalToken", tokenInput.value.trim());
+        loadUsageHistory();
+      });
+
+      loadUsageHistory();
+    </script>
+  </body>
+</html>"""
+    return template.replace("__ACCOUNT_LABEL__", json.dumps(label))
+
+
+def _render_usage_stats_page() -> str:
+    return """<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Usage Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      :root{
+        --bg:#0A0A0A;--surface:#171717;--surface-hi:#202020;--border:#2B2B2B;
+        --text:#E5E7EB;--dim:#94A3B8;--green:#10B981;--red:#EF4444;--amber:#F59E0B;--blue:#38BDF8;
+      }
+      body{font-family:'Inter',system-ui,sans-serif;color:var(--text);background:var(--bg);min-height:100vh}
+      .wrap{max-width:1200px;margin:0 auto;padding:24px 18px 56px}
+      .top{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+      .title{font:700 1.6rem 'Outfit',sans-serif}
+      .sub{color:var(--dim);font-size:.9rem;margin-top:4px}
+      .actions{display:flex;gap:8px;flex-wrap:wrap}
+      .btn,.token-input{
+        height:38px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);
+      }
+      .btn{padding:0 14px;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;cursor:pointer}
+      .btn:hover{background:var(--surface-hi)}
+      .token-input{padding:0 12px;width:280px}
+      .grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:12px}
+      .card,.panel{background:var(--surface);border:1px solid var(--border);border-radius:12px}
+      .card{padding:14px}
+      .k{font-size:.72rem;text-transform:uppercase;letter-spacing:.06em;color:var(--dim);margin-bottom:6px}
+      .v{font:700 1.08rem 'Outfit',sans-serif}
+      .panel{padding:14px;margin-top:12px}
+      .panel h2{font:600 1rem 'Outfit',sans-serif;margin-bottom:10px}
+      #chartTitle{margin-bottom:8px}
+      #chartArea{width:100%;height:260px;background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:6px}
+      #status{margin:8px 0;color:var(--amber);font-size:.88rem}
+      .graph-pills{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+      .graph-pill{
+        padding:6px 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface-hi);
+        color:var(--dim);font-size:.78rem;cursor:pointer;
+      }
+      .graph-pill.active{border-color:var(--blue);color:#e2e8f0;background:#0f172a}
+      .account-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+      .acct{padding:10px;border:1px solid var(--border);border-radius:10px;background:#111827}
+      .acct a{color:#93C5FD;text-decoration:none}
+      .meter{margin-top:8px;height:8px;background:#0b1220;border-radius:99px;overflow:hidden;border:1px solid #1f2937}
+      .meter span{display:block;height:100%;background:var(--green)}
+      @media(max-width:1024px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.account-list{grid-template-columns:1fr}}
+      @media(max-width:640px){.grid{grid-template-columns:1fr}.token-input{width:100%}}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="top">
+        <div>
+          <div class="title">Overall Usage Analytics</div>
+          <div class="sub">Cross-account totals, live usage percentages, rollover wastage, and trends.</div>
+        </div>
+        <div class="actions">
+          <input id="tokenInput" class="token-input" type="password" placeholder="Bearer token" />
+          <button id="applyToken" class="btn" type="button">Apply Token</button>
+          <a class="btn" href="/ui">Back</a>
+        </div>
+      </div>
+      <div id="status"></div>
+      <div class="grid">
+        <div class="card"><div class="k">Accounts</div><div class="v" id="totalAccounts">--</div></div>
+        <div class="card"><div class="k">Lifetime Used</div><div class="v" id="lifetimeUsed">--</div></div>
+        <div class="card"><div class="k">Current Window Used</div><div class="v" id="windowUsed">--</div></div>
+        <div class="card"><div class="k">Current Window Limit</div><div class="v" id="windowLimit">--</div></div>
+        <div class="card"><div class="k">Total Wasted</div><div class="v" id="totalWasted">--</div></div>
+      </div>
+
+      <div class="panel">
+        <h2 id="chartTitle">Graph</h2>
+        <div class="graph-pills" id="graphPills"></div>
+        <svg id="chartArea" viewBox="0 0 1000 260" preserveAspectRatio="none"></svg>
+      </div>
+      <div class="panel">
+        <h2>Per-Account Usage Overview</h2>
+        <div class="account-list" id="accountList"></div>
+      </div>
+    </div>
+
+    <script>
+      const $ = id => document.getElementById(id);
+      const tokenInput = $("tokenInput");
+      const statusEl = $("status");
+      const chartArea = $("chartArea");
+      const chartTitleEl = $("chartTitle");
+      const graphPillsEl = $("graphPills");
+      const getToken = () => (localStorage.getItem("internalToken") || "").trim();
+      tokenInput.value = getToken();
+      function setStatus(msg) { statusEl.textContent = msg || ""; }
+      function authHeaders() {
+        const token = getToken();
+        return token ? { Authorization: "Bearer " + token } : {};
+      }
+
+      const GRAPH_OPTIONS = [
+        { key: "rollover_used_wasted", label: "Rollover Used vs Wasted" },
+        { key: "rollover_utilization", label: "Rollover Utilization %" },
+        { key: "live_5hr", label: "Live 5hr %" },
+        { key: "live_7d", label: "Live 7d %" },
+        { key: "lifetime_by_account", label: "Lifetime Used by Account" },
+        { key: "wasted_by_account", label: "Total Wasted by Account" },
+      ];
+      let selectedGraph = "rollover_used_wasted";
+      let statsData = null;
+      let accountsData = null;
+
+      function drawNoData(svg, message) {
+        svg.innerHTML = `<rect x="0" y="0" width="1000" height="260" fill="#0f172a"></rect>
+          <text x="500" y="132" text-anchor="middle" fill="#94A3B8" font-size="18">${message}</text>`;
+      }
+
+      function drawBars(svg, points, series) {
+        const w = 1000, h = 260, pad = 28;
+        if (!points.length) {
+          drawNoData(svg, "No data available for this graph yet");
+          return;
+        }
+        const maxY = Math.max(
+          1,
+          ...points.map(p => Math.max(...series.map(s => Number(p[s.key] || 0))))
+        );
+        const fullWidth = (w - (pad * 2)) / points.length;
+        const eachWidth = Math.max(2, (fullWidth / series.length) - 3);
+        const baseLine = `<line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="#334155" stroke-width="1"></line>`;
+        const bars = series.map((s, si) => points.map((p, i) => {
+          const v = Number(p[s.key] || 0);
+          const bh = ((h - (pad * 2)) * v) / maxY;
+          const x = pad + (i * fullWidth) + (si * (eachWidth + 2)) + 2;
+          const y = h - pad - bh;
+          return `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${eachWidth.toFixed(2)}" height="${bh.toFixed(2)}" fill="${s.color}" opacity="0.88"></rect>`;
+        }).join("")).join("");
+        svg.innerHTML = baseLine + bars;
+      }
+
+      function buildGraphPoints() {
+        const trend = (statsData && statsData.daily_rollover_trend) || [];
+        const perAccount = (statsData && statsData.per_account) || [];
+        const liveAccounts = (accountsData && accountsData.accounts) || [];
+
+        if (selectedGraph === "rollover_used_wasted") {
+          chartTitleEl.textContent = "Daily Rollover Trend (Used vs Wasted)";
+          return {
+            points: trend,
+            series: [
+              { key: "usage_used", color: "#10B981" },
+              { key: "usage_wasted", color: "#EF4444" },
+            ],
+          };
+        }
+        if (selectedGraph === "rollover_utilization") {
+          chartTitleEl.textContent = "Daily Rollover Utilization %";
+          return {
+            points: trend.map(p => ({ value: Number(p.utilization_percent || 0) })),
+            series: [{ key: "value", color: "#38BDF8" }],
+          };
+        }
+        if (selectedGraph === "live_5hr") {
+          chartTitleEl.textContent = "Live 5hr Usage % by Account";
+          return {
+            points: liveAccounts.map(a => ({
+              value: Number(a.rate_limits?.primary?.usedPercent ?? a.rate_limits?.requests?.usedPercent ?? 0),
+            })),
+            series: [{ key: "value", color: "#10B981" }],
+          };
+        }
+        if (selectedGraph === "live_7d") {
+          chartTitleEl.textContent = "Live 7d Usage % by Account";
+          return {
+            points: liveAccounts.map(a => ({
+              value: Number(a.rate_limits?.secondary?.usedPercent ?? a.rate_limits?.tokens?.usedPercent ?? 0),
+            })),
+            series: [{ key: "value", color: "#F59E0B" }],
+          };
+        }
+        if (selectedGraph === "lifetime_by_account") {
+          chartTitleEl.textContent = "Lifetime Used by Account";
+          return {
+            points: perAccount.map(a => ({ value: Number(a.usage_tracking?.lifetime_used || 0) })),
+            series: [{ key: "value", color: "#38BDF8" }],
+          };
+        }
+        chartTitleEl.textContent = "Total Wasted by Account";
+        return {
+          points: perAccount.map(a => ({ value: Number(a.summary?.total_wasted || 0) })),
+          series: [{ key: "value", color: "#EF4444" }],
+        };
+      }
+
+      function renderGraphPills() {
+        graphPillsEl.innerHTML = GRAPH_OPTIONS.map(opt =>
+          `<button type="button" class="graph-pill ${opt.key === selectedGraph ? "active" : ""}" data-graph="${opt.key}">${opt.label}</button>`
+        ).join("");
+      }
+
+      function renderSelectedGraph() {
+        renderGraphPills();
+        if (!statsData) {
+          drawNoData(chartArea, "Load stats to view graphs");
+          return;
+        }
+        const built = buildGraphPoints();
+        drawBars(chartArea, built.points, built.series);
+      }
+
+      function accountTile(item) {
+        const usage = item.usage_tracking || {};
+        const summary = item.summary || {};
+        const used = Number(usage.usage_in_window || 0);
+        const limit = Number(usage.usage_limit || 0);
+        const pct = limit > 0 ? Math.max(0, Math.min(100, (used / limit) * 100)) : 0;
+        return `<div class="acct">
+          <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+            <div>
+              <div style="font:600 .98rem 'Outfit',sans-serif">${item.display_label || item.label}</div>
+              <div style="color:#94A3B8;font-size:.82rem">${item.email || "—"}</div>
+            </div>
+            <a href="/ui/accounts/${encodeURIComponent(item.label)}">View</a>
+          </div>
+          <div style="margin-top:8px;font-size:.84rem">Window: ${used.toLocaleString()} / ${limit.toLocaleString()}</div>
+          <div class="meter"><span style="width:${pct.toFixed(2)}%"></span></div>
+          <div style="margin-top:8px;font-size:.82rem;color:#94A3B8">Lifetime used: ${Number(usage.lifetime_used || 0).toLocaleString()} | Total wasted: ${Number(summary.total_wasted || 0).toLocaleString()}</div>
+        </div>`;
+      }
+
+      async function loadStats() {
+        setStatus("");
+        try {
+          const [statsRes, accountsRes] = await Promise.all([
+            fetch("/api/usage/stats", { headers: { "Content-Type": "application/json", ...authHeaders() } }),
+            fetch("/api/accounts", { headers: { "Content-Type": "application/json", ...authHeaders() } }),
+          ]);
+          if (!statsRes.ok) {
+            const text = await statsRes.text();
+            throw new Error(text || "Failed to load usage stats");
+          }
+          statsData = await statsRes.json();
+          accountsData = accountsRes.ok ? await accountsRes.json() : { accounts: [] };
+
+          const totals = statsData.totals || {};
+          $("totalAccounts").textContent = Number(totals.accounts || 0).toLocaleString();
+          $("lifetimeUsed").textContent = Number(totals.lifetime_used || 0).toLocaleString();
+          $("windowUsed").textContent = Number(totals.active_window_used || 0).toLocaleString();
+          $("windowLimit").textContent = Number(totals.active_window_limit || 0).toLocaleString();
+          $("totalWasted").textContent = Number(totals.total_wasted || 0).toLocaleString();
+
+          const accounts = statsData.per_account || [];
+          $("accountList").innerHTML = accounts.length
+            ? accounts.map(accountTile).join("")
+            : '<div style="color:#94A3B8">No accounts found.</div>';
+
+          renderSelectedGraph();
+        } catch (err) {
+          setStatus(err.message || "Failed to load usage stats.");
+          statsData = null;
+          accountsData = null;
+          renderSelectedGraph();
+        }
+      }
+
+      graphPillsEl.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-graph]");
+        if (!btn) return;
+        selectedGraph = btn.getAttribute("data-graph") || selectedGraph;
+        renderSelectedGraph();
+      });
+
+      $("applyToken").addEventListener("click", () => {
+        localStorage.setItem("internalToken", tokenInput.value.trim());
+        loadStats();
+      });
+
+      renderSelectedGraph();
+      loadStats();
+    </script>
+  </body>
+</html>"""
+
+
 def _render_index() -> str:
     return """<!doctype html>
 <html lang="en">
@@ -1345,11 +2376,13 @@ def _render_index() -> str:
       #statusNote.show{display:flex;align-items:center;gap:8px}
       #statusNote.warn{background:rgba(251,191,36,.08);color:var(--amber);
         border:1px solid rgba(251,191,36,.18)}
-      #statusNote.ok{background:rgba(52,211,153,.08);color:var(--green);
-        border:1px solid rgba(52,211,153,.18)}
 
       /* ── ACCOUNT TABLE ────────────────────── */
       .accounts-table{width:100%;border-collapse:separate;border-spacing:0}
+      .accounts-table col:nth-child(1){width:28%}
+      .accounts-table col:nth-child(2){width:34%}
+      .accounts-table col:nth-child(3){width:22%}
+      .accounts-table col:nth-child(4){width:16%}
       .accounts-table th{
         font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.07em;
         color:var(--dim);text-align:left;padding:10px 14px;
@@ -1364,6 +2397,10 @@ def _render_index() -> str:
 
       .acct-name{font-family:'Outfit',sans-serif;font-weight:600;font-size:.95rem}
       .acct-email{color:var(--dim);font-size:.8rem;margin-top:2px}
+      .profile-link{
+        display:block;text-decoration:none;color:inherit;border-radius:8px;padding:2px 0;
+      }
+      .profile-link:hover .acct-name{text-decoration:underline}
       .pill{
         display:inline-flex;align-items:center;gap:5px;
         padding:4px 10px;border-radius:4px;font-size:.72rem;font-weight:600;
@@ -1374,10 +2411,10 @@ def _render_index() -> str:
 
       /* progress bar for limits */
       .limit-bar-wrap{display:flex;flex-direction:column;gap:6px}
-      .limit-bar-row{display:flex;align-items:center;gap:10px}
+      .limit-bar-row{display:flex;align-items:center;gap:10px;min-height:24px}
       .limit-bar-label{font-size:.72rem;font-weight:600;text-transform:uppercase;
         letter-spacing:.05em;color:var(--dim);min-width:50px}
-      .limit-bar-track{flex:1;height:6px;border-radius:99px;background:var(--bg);
+      .limit-bar-track{flex:0 0 140px;min-width:140px;width:140px;height:6px;border-radius:99px;background:var(--bg);
         overflow:hidden;border:1px solid var(--border)}
       .limit-bar-fill{height:100%;border-radius:99px;transition:width .6s ease}
       .limit-bar-fill.ok{background:var(--green)}
@@ -1385,8 +2422,14 @@ def _render_index() -> str:
       .limit-bar-fill.danger{background:var(--red)}
       .limit-bar-text{font-size:.78rem;font-weight:600;min-width:52px;text-align:right;
         font-family:'Outfit',sans-serif}
+      .reset-wrap{display:flex;flex-direction:column;gap:6px}
+      .reset-row{display:flex;align-items:center;min-height:24px}
+      .reset-value{
+        font-size:.82rem;color:var(--text);font-weight:500;white-space:nowrap
+      }
 
       .acct-actions{display:flex;gap:6px}
+      .acct-actions a{text-decoration:none}
 
       /* empty state */
       .empty-state{
@@ -1394,6 +2437,26 @@ def _render_index() -> str:
       }
       .empty-state .empty-icon{font-size:2.5rem;margin-bottom:12px;opacity:.4}
       .empty-state p{font-size:.9rem;line-height:1.5}
+
+      .callback-modal{
+        position:fixed;inset:0;background:rgba(2,6,23,.78);display:none;align-items:center;
+        justify-content:center;padding:20px;z-index:90;
+      }
+      .callback-modal.open{display:flex}
+      .callback-card{
+        width:min(760px,95vw);background:var(--surface);border:1px solid var(--border);
+        border-radius:14px;padding:18px;
+      }
+      .callback-title{font-family:'Outfit',sans-serif;font-size:1rem;font-weight:600;margin-bottom:8px}
+      .callback-sub{color:var(--dim);font-size:.84rem;line-height:1.4;margin-bottom:10px}
+      .callback-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+      .callback-row .btn{height:34px}
+      #callbackUrlInput{
+        width:100%;height:88px;border:1px solid var(--border);background:var(--bg);color:var(--text);
+        border-radius:10px;padding:10px 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        font-size:.82rem;resize:vertical;
+      }
+      #callbackHint{font-size:.8rem;color:var(--dim);min-height:20px}
 
       /* ── RESPONSIVE ───────────────────────── */
       @media(max-width:860px){
@@ -1404,6 +2467,7 @@ def _render_index() -> str:
         .page{padding:20px 14px 48px}
       }
       @media(max-width:600px){
+        .limit-bar-track{flex:0 0 110px;min-width:110px;width:110px}
         .accounts-table thead{display:none}
         .accounts-table,
         .accounts-table tbody,
@@ -1433,6 +2497,7 @@ def _render_index() -> str:
           Add Account
         </button>
         <button id="importCurrent" class="btn" type="button">Import Current</button>
+        <a href="/ui/stats" class="btn" style="text-decoration:none">Overall Stats</a>
         <button id="refreshAll" class="btn btn-icon" type="button" title="Refresh">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
@@ -1448,6 +2513,23 @@ def _render_index() -> str:
       </div>
 
       <div id="statusNote"></div>
+
+      <div id="callbackModal" class="callback-modal" role="dialog" aria-modal="true" aria-labelledby="callbackModalTitle">
+        <div class="callback-card">
+          <div id="callbackModalTitle" class="callback-title">Complete Add Account</div>
+          <div class="callback-sub">Paste the full localhost callback URL from browser redirect to relay it into this login session.</div>
+          <div class="callback-row">
+            <button id="openAuthUrl" class="btn btn-sm" type="button">Open Auth URL</button>
+            <span id="callbackSessionMeta" style="font-size:.78rem;color:var(--dim)"></span>
+          </div>
+          <textarea id="callbackUrlInput" placeholder="http://127.0.0.1:1455/auth/callback?code=...&state=..."></textarea>
+          <div id="callbackHint"></div>
+          <div class="callback-row" style="justify-content:flex-end;margin-top:8px">
+            <button id="cancelCallback" class="btn btn-sm" type="button">Cancel</button>
+            <button id="submitCallback" class="btn btn-primary btn-sm" type="button">Submit Callback Link</button>
+          </div>
+        </div>
+      </div>
 
       <!-- TWO COLUMN LAYOUT -->
       <div class="two-col">
@@ -1466,10 +2548,6 @@ def _render_index() -> str:
                 <div class="kv-value" id="profilesWithTokens">--</div>
               </div>
               <div class="kv-item">
-                <div class="kv-label">Login Status</div>
-                <div class="kv-value" id="loginStatus"><span class="status-dot green"></span> Idle</div>
-              </div>
-              <div class="kv-item">
                 <div class="kv-label">Auth File Updated</div>
                 <div class="kv-value small" id="authUpdatedAt">--</div>
               </div>
@@ -1480,13 +2558,13 @@ def _render_index() -> str:
             <div class="panel-title">Aggregated Usage</div>
             <div class="kv-list">
               <div class="kv-item">
-                <div class="kv-label">Cluster 5HR Usage</div>
+                <div class="kv-label">Cluster 5hr Usage</div>
                 <div class="kv-value small" id="agg5Hr">
                   <div class="limit-bar-track"><div class="limit-bar-fill" style="width:0%"></div></div>
                 </div>
               </div>
               <div class="kv-item">
-                <div class="kv-label">Cluster Weekly Usage</div>
+                <div class="kv-label">Cluster 7d Usage</div>
                 <div class="kv-value small" id="aggWeekly">
                   <div class="limit-bar-track"><div class="limit-bar-fill" style="width:0%"></div></div>
                 </div>
@@ -1519,15 +2597,24 @@ def _render_index() -> str:
       const tokenInput = $("tokenInput");
       const accountsManagedEl = $("accountsManaged");
       const profilesWithTokensEl = $("profilesWithTokens");
-      const loginStatusEl = $("loginStatus");
       const authUpdatedAtEl = $("authUpdatedAt");
       const accountCountEl = $("accountCount");
+      const callbackModalEl = $("callbackModal");
+      const callbackUrlInputEl = $("callbackUrlInput");
+      const callbackHintEl = $("callbackHint");
+      const callbackSessionMetaEl = $("callbackSessionMeta");
+      let pendingRelay = null;
 
       const getToken = () => (localStorage.getItem("internalToken") || "").trim();
 
       function setStatus(text, warn = false) {
-        statusNoteEl.textContent = text || "";
-        statusNoteEl.className = text ? ("show " + (warn ? "warn" : "ok")) : "";
+        if (!warn || !text) {
+          statusNoteEl.textContent = "";
+          statusNoteEl.className = "";
+          return;
+        }
+        statusNoteEl.textContent = text;
+        statusNoteEl.className = "show warn";
       }
 
       function authHeaders() {
@@ -1570,20 +2657,34 @@ def _render_index() -> str:
         } catch (_) { return isoStr; }
       }
 
-      function statusDot(status) {
-        const s = (status || "").toLowerCase();
-        if (s === "idle" || s === "ok") return '<span class="status-dot green"></span>';
-        if (s.includes("wait") || s.includes("pending")) return '<span class="status-dot amber"></span>';
-        if (s.includes("error") || s.includes("fail")) return '<span class="status-dot red"></span>';
-        return '<span class="status-dot green"></span>';
+      function formatResetValue(data) {
+        if (!data || typeof data !== "object") return null;
+        const raw = data.resetsAt ?? data.resetAt ?? data.nextResetAt ?? data.reset;
+        if (raw === undefined || raw === null || raw === "") return null;
+
+        let d = null;
+        if (typeof raw === "number" && Number.isFinite(raw)) {
+          d = new Date(raw * 1000);
+        } else if (typeof raw === "string") {
+          const trimmed = raw.trim();
+          if (!trimmed) return null;
+          if (/^\\d+$/.test(trimmed)) d = new Date(Number(trimmed) * 1000);
+          else d = new Date(trimmed);
+        }
+
+        if (!d || Number.isNaN(d.getTime())) return String(raw);
+        return d.toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
       }
 
       /* ── render helpers ─────────────────── */
       function limitBar(label, data) {
         if (!data) return "";
         const pct = data.percent ?? data.usedPercent ?? null;
-        const remaining = data.remaining ?? "--";
-        const limit = data.limit ?? "--";
         const fillPct = pct !== null ? Math.min(100, Math.max(0, pct)) : 0;
         const cls = fillPct > 85 ? "danger" : fillPct > 60 ? "warn" : "ok";
         const pctText = pct !== null ? fillPct + "%" : "--";
@@ -1591,6 +2692,15 @@ def _render_index() -> str:
           <span class="limit-bar-label">${label}</span>
           <div class="limit-bar-track"><div class="limit-bar-fill ${cls}" style="width:${fillPct}%"></div></div>
           <span class="limit-bar-text">${pctText}</span>
+        </div>`;
+      }
+
+      function resetRows(primary, secondary) {
+        const p = formatResetValue(primary) || "--";
+        const s = formatResetValue(secondary) || "--";
+        return `<div class="reset-wrap">
+          <div class="reset-row"><span class="reset-value">${p}</span></div>
+          <div class="reset-row"><span class="reset-value">${s}</span></div>
         </div>`;
       }
 
@@ -1602,15 +2712,17 @@ def _render_index() -> str:
         const prim = rate.requests || rate.primary || null;
         const sec = rate.tokens || rate.secondary || null;
         const limitsHtml = (prim || sec)
-          ? `<div class="limit-bar-wrap">${limitBar("Requests", prim)}${limitBar("Tokens", sec)}</div>`
+          ? `<div class="limit-bar-wrap">${limitBar("5hr", prim)}${limitBar("7d", sec)}</div>`
           : '<span style="color:var(--dim);font-size:.8rem">No limit data</span>';
+        const resetHtml = resetRows(prim, sec);
 
         return `<tr>
-          <td data-label="Profile"><div class="acct-name">${displayLabel}</div><div class="acct-email">${email}</div></td>
-          <td data-label="Status"><span class="pill ${isActive ? "active" : ""}">${isActive ? "Active" : "Saved"}</span></td>
+          <td data-label="Profile"><a class="profile-link" href="/ui/accounts/${encodeURIComponent(account.label)}"><div class="acct-name">${displayLabel} ${isActive ? '<span class="pill active" style="margin-left:8px">Current</span>' : ""}</div><div class="acct-email">${email}</div></a></td>
           <td data-label="Rate Limits">${limitsHtml}</td>
+          <td data-label="Rate Limit Reset">${resetHtml}</td>
           <td data-label="Actions"><div class="acct-actions">
             <button class="btn btn-sm ${isActive ? "" : "btn-primary"}" type="button" data-action="switch" data-label="${account.label}">${isActive ? "Current" : "Switch"}</button>
+            <button class="btn btn-sm" type="button" data-action="delete" data-label="${account.label}" style="border-color:rgba(239,68,68,.35);color:#fca5a5">Delete</button>
             <button class="btn btn-sm btn-icon" type="button" data-action="export" data-label="${account.label}" title="Export">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             </button>
@@ -1620,7 +2732,8 @@ def _render_index() -> str:
 
       function wrapTable(rows) {
         return `<table class="accounts-table">
-          <thead><tr><th>Profile</th><th>Status</th><th>Rate Limits</th><th style="width:140px">Actions</th></tr></thead>
+          <colgroup><col><col><col><col></colgroup>
+          <thead><tr><th>Profile</th><th>Rate Limits</th><th>Rate Limit Reset</th><th style="width:260px">Actions</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
       }
@@ -1636,13 +2749,10 @@ def _render_index() -> str:
           const data = await res.json();
           accountsManagedEl.textContent = (data.accounts_managed ?? "--").toString();
           profilesWithTokensEl.textContent = (data.profiles_with_tokens ?? "--").toString();
-          const status = data.login_status || "idle";
-          loginStatusEl.innerHTML = statusDot(status) + " " + status.charAt(0).toUpperCase() + status.slice(1);
           authUpdatedAtEl.textContent = humanDate(data.auth_file?.modified_at);
         } catch (_) {
           accountsManagedEl.textContent = "--";
           profilesWithTokensEl.textContent = "--";
-          loginStatusEl.innerHTML = '<span class="status-dot amber"></span> Unknown';
           authUpdatedAtEl.textContent = "--";
         }
       }
@@ -1685,8 +2795,8 @@ def _render_index() -> str:
           let avg5Hr = Math.round(sum5Hr / accounts.length);
           let avgWeekly = Math.round(sumWeekly / accounts.length);
           
-          $("agg5Hr").innerHTML = limitBar("5HR", {percent: avg5Hr}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avg5Hr}% remaining across cluster</div>`;
-          $("aggWeekly").innerHTML = limitBar("WEEKLY", {percent: avgWeekly}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avgWeekly}% remaining across cluster</div>`;
+          $("agg5Hr").innerHTML = limitBar("5hr", {percent: avg5Hr}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avg5Hr}% remaining across cluster</div>`;
+          $("aggWeekly").innerHTML = limitBar("7d", {percent: avgWeekly}) + `<div style="font-size:0.75rem;margin-top:6px;color:var(--dim)">${100 - avgWeekly}% remaining across cluster</div>`;
           $("recProfile").innerHTML = `<span class="pill active" style="cursor:pointer" onclick="document.querySelector('[data-action=\\'switch\\'][data-label=\\'${rec.label}\\']').click()">Switch to <b>${rec.display_label || rec.label}</b></span>`;
 
           accountsEl.innerHTML = wrapTable(accounts.map(renderCard).join(""));
@@ -1702,12 +2812,89 @@ def _render_index() -> str:
         const res = await apiFetch("/auth/login/start", { method: "POST", body: "{}" });
         if (!res.ok) throw new Error(await readError(res, "Unable to start login"));
         const data = await res.json();
-        setStatus(data.instructions || "Login started.");
+        pendingRelay = {
+          sessionId: data.session_id,
+          relayToken: data.relay_token,
+          authUrl: data.auth_url || data.browser_url || null,
+        };
+        openCallbackModal();
+        setStatus(data.instructions || "Login started. Paste callback link to complete relay.");
         await loadPublicStats();
+      }
+
+      function openCallbackModal() {
+        if (!pendingRelay) return;
+        callbackSessionMetaEl.textContent = pendingRelay.sessionId ? `session: ${pendingRelay.sessionId}` : "";
+        callbackUrlInputEl.value = "";
+        callbackHintEl.textContent = "";
+        callbackModalEl.classList.add("open");
+      }
+
+      function closeCallbackModal() {
+        callbackModalEl.classList.remove("open");
+      }
+
+      async function cancelAddAccountFlow() {
+        const sid = pendingRelay?.sessionId || null;
+        try {
+          await apiFetch("/auth/login/cancel", {
+            method: "POST",
+            body: JSON.stringify({ session_id: sid }),
+          });
+        } catch (_) {
+          // Best effort cancel.
+        }
+        pendingRelay = null;
+        closeCallbackModal();
+      }
+
+      function parseCallbackUrl(fullUrl) {
+        let parsed;
+        try {
+          parsed = new URL(fullUrl);
+        } catch (_) {
+          throw new Error("Callback URL is invalid.");
+        }
+        const code = parsed.searchParams.get("code");
+        const state = parsed.searchParams.get("state");
+        const error = parsed.searchParams.get("error");
+        const error_description = parsed.searchParams.get("error_description");
+        if (!code && !error) {
+          throw new Error("Callback URL must include code or error.");
+        }
+        return { code, state, error, error_description };
+      }
+
+      async function submitCallbackLink() {
+        if (!pendingRelay?.sessionId || !pendingRelay?.relayToken) {
+          throw new Error("No active login session. Click Add Account first.");
+        }
+        const fullUrl = callbackUrlInputEl.value.trim();
+        if (!fullUrl) throw new Error("Paste the callback URL first.");
+        const parsed = parseCallbackUrl(fullUrl);
+
+        const payload = {
+          session_id: pendingRelay.sessionId,
+          relay_token: pendingRelay.relayToken,
+          full_url: fullUrl,
+          ...parsed,
+        };
+        const res = await apiFetch("/auth/relay-callback", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(await readError(res, "Relay callback failed"));
+        closeCallbackModal();
+        callbackHintEl.textContent = "";
+        setStatus("Callback relayed. Finish/import account when auth is ready.");
       }
 
       async function importCurrent() {
         const lbl = window.prompt("Optional label (leave empty for auto):", "");
+        if (lbl === null) {
+          setStatus("Import canceled.");
+          return;
+        }
         const body = lbl && lbl.trim() ? { label: lbl.trim() } : {};
         const res = await apiFetch("/auth/import-current", { method: "POST", body: JSON.stringify(body) });
         if (!res.ok) throw new Error(await readError(res, "Import failed"));
@@ -1731,6 +2918,14 @@ def _render_index() -> str:
         setStatus("Exported '" + label + "'");
       }
 
+      async function deleteProfile(label) {
+        const confirmed = window.confirm(`Delete profile "${label}" from this system? This removes saved auth + usage history.`);
+        if (!confirmed) return;
+        const res = await apiFetch("/auth/delete", { method: "POST", body: JSON.stringify({ label }) });
+        if (!res.ok) throw new Error(await readError(res, "Delete failed"));
+        setStatus("Deleted '" + label + "'");
+      }
+
       const refreshAll = () => Promise.all([loadPublicStats(), loadAccounts()]);
 
       $("tokenSave").addEventListener("click", async () => { localStorage.setItem("internalToken", tokenInput.value.trim()); await refreshAll(); });
@@ -1744,7 +2939,34 @@ def _render_index() -> str:
         try {
           if (action === "switch") { await switchProfile(label); await refreshAll(); }
           else if (action === "export") { await exportProfile(label); }
+          else if (action === "delete") { await deleteProfile(label); await refreshAll(); }
         } catch (err) { setStatus(err.message, true); }
+      });
+      $("openAuthUrl").addEventListener("click", () => {
+        if (!pendingRelay?.authUrl) {
+          callbackHintEl.textContent = "No auth URL was returned by the server.";
+          return;
+        }
+        window.open(pendingRelay.authUrl, "_blank", "noopener,noreferrer");
+      });
+      $("submitCallback").addEventListener("click", async () => {
+        try {
+          callbackHintEl.textContent = "";
+          await submitCallbackLink();
+          await refreshAll();
+        } catch (err) {
+          callbackHintEl.textContent = err.message || "Unable to submit callback link.";
+        }
+      });
+      $("cancelCallback").addEventListener("click", () => {
+        callbackHintEl.textContent = "";
+        cancelAddAccountFlow();
+      });
+      callbackModalEl.addEventListener("click", e => {
+        if (e.target === callbackModalEl) {
+          callbackHintEl.textContent = "";
+          cancelAddAccountFlow();
+        }
       });
       refreshAll();
       setInterval(() => { loadPublicStats(); if(getToken()) loadAccounts(); }, 15000);

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .account_usage_store import get_accounts_by_ids
 from .config import settings
 
 
@@ -16,6 +17,15 @@ class AccountProfile:
     auth: dict[str, Any]
     access_token: str | None = None
     email: str | None = None
+    rate_limit_window_type: str | None = None
+    usage_limit: int | None = None
+    usage_in_window: int | None = None
+    rate_limit_refresh_at: str | None = None
+    rate_limit_last_refreshed_at: str | None = None
+    last_usage_sync_at: str | None = None
+    lifetime_used: int | None = None
+    usage_created_at: str | None = None
+    usage_updated_at: str | None = None
 
 
 TOKEN_KEYS = [
@@ -133,5 +143,25 @@ def list_profiles() -> list[AccountProfile]:
                 email=email,
             )
         )
+
+    usage_by_id: dict[str, Any] = {}
+    try:
+        usage_by_id = get_accounts_by_ids([profile.label for profile in profiles])
+    except Exception:
+        usage_by_id = {}
+
+    for profile in profiles:
+        usage = usage_by_id.get(profile.label)
+        if not usage:
+            continue
+        profile.rate_limit_window_type = usage.rate_limit_window_type
+        profile.usage_limit = usage.usage_limit
+        profile.usage_in_window = usage.usage_in_window
+        profile.rate_limit_refresh_at = usage.rate_limit_refresh_at
+        profile.rate_limit_last_refreshed_at = usage.rate_limit_last_refreshed_at
+        profile.last_usage_sync_at = usage.last_usage_sync_at
+        profile.lifetime_used = usage.lifetime_used
+        profile.usage_created_at = usage.created_at
+        profile.usage_updated_at = usage.updated_at
 
     return profiles

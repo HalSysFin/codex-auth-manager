@@ -413,6 +413,29 @@ def relay_callback_to_login(callback_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def cancel_login() -> bool:
+    global _LOGIN_STATE
+    if _LOGIN_STATE is None:
+        return False
+
+    process = _LOGIN_STATE.process
+    _LOGIN_STATE = None
+    if process is None:
+        return False
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+            return True
+    except OSError:
+        return False
+    return False
+
+
 def _find_first_key(payload: Any, keys: list[str]) -> str | None:
     if isinstance(payload, dict):
         for key in keys:

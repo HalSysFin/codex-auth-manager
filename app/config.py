@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     codex_auth_path: str = "~/.codex/auth.json"
     callback_store_dir: str = "~/.codex-switch/callbacks"
     codex_profiles_dir: str = "~/.codex-switch/profiles"
+    usage_db_path: str = "~/.codex-switch/auth-manager.sqlite3"
     login_session_ttl_seconds: int = 600
     web_login_username: str | None = None
     web_login_password: str | None = None
@@ -47,6 +48,9 @@ class Settings(BaseSettings):
 
     def profiles_dir(self) -> Path:
         return _expand(self.codex_profiles_dir)
+
+    def usage_db_file(self) -> Path:
+        return _expand(self.usage_db_path)
 
 
 settings = Settings()
