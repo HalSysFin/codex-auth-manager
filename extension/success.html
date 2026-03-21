@@ -5,24 +5,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Codex Auth Relay</title>
     <style>
+      :root {
+        --bg: #091016;
+        --panel: #15202b;
+        --text: #ecf3ff;
+        --muted: #a1aec2;
+        --accent-2: #97f7b1;
+        --border: rgba(255, 255, 255, 0.1);
+      }
       body {
-        font-family: Arial, sans-serif;
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: #f3f6fb;
-        color: #1a1f2b;
+        background: radial-gradient(circle at 85% -10%, rgba(133,214,255,0.18), transparent 40%),
+                    radial-gradient(circle at 10% 120%, rgba(151,247,177,0.15), transparent 45%),
+                    var(--bg);
+        color: var(--text);
       }
       .panel {
         max-width: 460px;
-        background: #ffffff;
-        border: 1px solid #dde5f1;
+        background: var(--panel);
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 20px;
       }
       h1 { margin-top: 0; font-size: 20px; }
-      p { line-height: 1.5; }
+      p { line-height: 1.5; color: var(--muted); }
+      p:first-of-type { color: var(--accent-2); font-weight: 600; }
     </style>
   </head>
   <body>

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .codex_switch import CodexSwitchResult
 from .codex_switch import save_label
 from .config import settings
 
@@ -26,8 +27,8 @@ def persist_current_auth(payload: Any) -> Path:
     return auth_path
 
 
-def save_current_auth_under_label(label: str) -> None:
-    save_label(label)
+def save_current_auth_under_label(label: str) -> CodexSwitchResult:
+    return save_label(label)
 
 
 def persist_and_save_label(label: str, payload: Any) -> Path:

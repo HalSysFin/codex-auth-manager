@@ -5,11 +5,23 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Codex Auth Relay Settings</title>
     <style>
+      :root {
+        --bg: #091016;
+        --panel: #15202b;
+        --text: #ecf3ff;
+        --muted: #a1aec2;
+        --accent: #85d6ff;
+        --accent-2: #97f7b1;
+        --danger: #ff8a8a;
+        --border: rgba(255, 255, 255, 0.1);
+      }
       body {
         margin: 0;
-        font-family: Arial, sans-serif;
-        background: #f5f7fb;
-        color: #101828;
+        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 85% -10%, rgba(133,214,255,0.18), transparent 40%),
+                    radial-gradient(circle at 10% 120%, rgba(151,247,177,0.15), transparent 45%),
+                    var(--bg);
+        color: var(--text);
       }
       .wrap {
         max-width: 720px;
@@ -17,8 +29,8 @@
         padding: 0 16px;
       }
       .card {
-        background: #fff;
-        border: 1px solid #dce4f2;
+        background: var(--panel);
+        border: 1px solid var(--border);
         border-radius: 12px;
         padding: 18px;
       }
@@ -33,46 +45,52 @@
         display: block;
         font-weight: 600;
         margin-bottom: 6px;
+        color: var(--text);
       }
       input {
         width: 100%;
         box-sizing: border-box;
-        border: 1px solid #c5d0e6;
+        border: 1px solid var(--border);
+        background: rgba(0, 0, 0, 0.2);
+        color: var(--text);
         border-radius: 8px;
         padding: 9px 10px;
         font-size: 14px;
       }
       .hint {
         margin-top: 5px;
-        color: #51607a;
+        color: var(--muted);
         font-size: 12px;
       }
       .actions {
         margin-top: 16px;
       }
       button {
-        border: 0;
+        border: 1px solid var(--border);
         border-radius: 10px;
         padding: 10px 14px;
         font-weight: 600;
-        background: #0f5fe8;
-        color: #fff;
+        background: linear-gradient(90deg, #2a7db0, #25a26f);
+        color: #f8fdff;
         cursor: pointer;
       }
       #status {
         margin-top: 12px;
         font-size: 13px;
+        color: var(--muted);
       }
       .ok {
-        color: #0f6b35;
+        color: var(--accent-2);
       }
       .err {
-        color: #9d1c1c;
+        color: var(--danger);
       }
       code {
-        background: #eff3ff;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--border);
         border-radius: 6px;
         padding: 1px 5px;
+        color: var(--text);
       }
     </style>
   </head>

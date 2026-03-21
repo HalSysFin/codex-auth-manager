@@ -405,6 +405,14 @@ async def auth_relay_callback(payload: dict[str, Any]) -> JSONResponse:
     if not validate_relay_token(session, relay_token):
         logger.warning("relay-callback rejected: invalid relay token session_id=%s", session_id)
         raise HTTPException(status_code=403, detail="Invalid relay token")
+    expected_state = _expected_state_from_auth_url(session.auth_url)
+    if expected_state and state and str(state).strip() != expected_state:
+        logger.warning(
+            "relay-callback state mismatch accepted session_id=%s expected=%s got=%s",
+            session_id,
+            expected_state,
+            state,
+        )
 
     callback_payload = {
         "code": code,
@@ -912,6 +920,20 @@ def _store_callback(payload: Any) -> Path:
         raise HTTPException(status_code=500, detail=f"Unable to store callback: {exc}") from exc
 
     return path
+
+
+def _expected_state_from_auth_url(auth_url: str | None) -> str | None:
+    if not auth_url:
+        return None
+    marker = "state="
+    index = auth_url.find(marker)
+    if index < 0:
+        return None
+    raw = auth_url[index + len(marker):]
+    if "&" in raw:
+        raw = raw.split("&", 1)[0]
+    state = raw.strip()
+    return state or None
 
 
 async def _exchange_code_for_token(
@@ -2397,6 +2419,11 @@ def _render_index() -> str:
 
       .acct-name{font-family:'Outfit',sans-serif;font-weight:600;font-size:.95rem}
       .acct-email{color:var(--dim);font-size:.8rem;margin-top:2px}
+      .acct-label{
+        color:var(--dim);font-size:.74rem;margin-top:3px;
+        font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+        letter-spacing:.01em;
+      }
       .profile-link{
         display:block;text-decoration:none;color:inherit;border-radius:8px;padding:2px 0;
       }
@@ -2711,13 +2738,18 @@ def _render_index() -> str:
         const rate = account.rate_limits || {};
         const prim = rate.requests || rate.primary || null;
         const sec = rate.tokens || rate.secondary || null;
+        const rateError = typeof rate.error === "string" ? rate.error : "";
         const limitsHtml = (prim || sec)
           ? `<div class="limit-bar-wrap">${limitBar("5hr", prim)}${limitBar("7d", sec)}</div>`
-          : '<span style="color:var(--dim);font-size:.8rem">No limit data</span>';
+          : (
+            rateError
+              ? `<span style="color:var(--amber);font-size:.8rem">${rateError.includes("token_expired") ? "Auth token expired. Re-login/import this account." : "Rate limit read failed."}</span>`
+              : '<span style="color:var(--dim);font-size:.8rem">No limit data</span>'
+          );
         const resetHtml = resetRows(prim, sec);
 
         return `<tr>
-          <td data-label="Profile"><a class="profile-link" href="/ui/accounts/${encodeURIComponent(account.label)}"><div class="acct-name">${displayLabel} ${isActive ? '<span class="pill active" style="margin-left:8px">Current</span>' : ""}</div><div class="acct-email">${email}</div></a></td>
+          <td data-label="Profile"><a class="profile-link" href="/ui/accounts/${encodeURIComponent(account.label)}"><div class="acct-name">${displayLabel} ${isActive ? '<span class="pill active" style="margin-left:8px">Current</span>' : ""}</div><div class="acct-email">${email}</div><div class="acct-label">Profile label: ${account.label}</div></a></td>
           <td data-label="Rate Limits">${limitsHtml}</td>
           <td data-label="Rate Limit Reset">${resetHtml}</td>
           <td data-label="Actions"><div class="acct-actions">
@@ -2886,7 +2918,39 @@ def _render_index() -> str:
         if (!res.ok) throw new Error(await readError(res, "Relay callback failed"));
         closeCallbackModal();
         callbackHintEl.textContent = "";
-        setStatus("Callback relayed. Finish/import account when auth is ready.");
+        setStatus("Callback relayed. Waiting for auth completion...");
+
+        const ready = await waitForLoginCompletion(pendingRelay.sessionId, 25);
+        if (!ready) {
+          setStatus("Callback relayed. Auth is still processing. Click Import Current in a few seconds.", true);
+          return;
+        }
+
+        const importRes = await apiFetch("/auth/import-current", {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        if (!importRes.ok) {
+          throw new Error(await readError(importRes, "Auth completed, but import failed"));
+        }
+        const importData = await importRes.json();
+        pendingRelay = null;
+        setStatus("Account imported as '" + importData.label + "'");
+      }
+
+      async function waitForLoginCompletion(sessionId, timeoutSeconds = 25) {
+        const deadline = Date.now() + timeoutSeconds * 1000;
+        while (Date.now() < deadline) {
+          const res = await fetch("/auth/login/status?session_id=" + encodeURIComponent(sessionId));
+          if (!res.ok) return false;
+          const data = await res.json();
+          if (data?.auth?.updated || data?.status === "complete") return true;
+          if (data?.status === "failed") {
+            throw new Error(data?.error || "Login failed before auth import");
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        return false;
       }
 
       async function importCurrent() {
