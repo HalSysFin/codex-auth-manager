@@ -21,7 +21,12 @@ services:
       OPENAI_CLIENT_SECRET: ${OPENAI_CLIENT_SECRET:-}
       OPENAI_REDIRECT_URI: ${OPENAI_REDIRECT_URI:-http://localhost:1455/auth/callback}
     volumes:
-      - ${HOST_CODEX_DIR:-/root/.codex}:/root/.codex
-      - ${HOST_CODEX_PROFILES_DIR:-/root/.codex-switch/profiles}:/root/.codex-switch/profiles
-      - ${HOST_CODEX_CALLBACKS_DIR:-/root/.codex-switch/callbacks}:/root/.codex-switch/callbacks
+      - codex_auth:/root/.codex
+      - codex_profiles:/root/.codex-switch/profiles
+      - codex_callbacks:/root/.codex-switch/callbacks
     restart: unless-stopped
+
+volumes:
+  codex_auth:
+  codex_profiles:
+  codex_callbacks:
