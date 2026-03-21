@@ -23,6 +23,10 @@ class AccountUsageState:
     usage_in_window: int
     rate_limit_refresh_at: str
     rate_limit_last_refreshed_at: str | None
+    primary_used_percent: float | None
+    primary_resets_at: str | None
+    secondary_used_percent: float | None
+    secondary_resets_at: str | None
     last_usage_sync_at: str | None
     lifetime_used: int
     created_at: str
@@ -293,6 +297,112 @@ def sync_account_usage_snapshot(
             f"UPDATE accounts SET {', '.join(updates)} WHERE id = ?",
             tuple(params),
         )
+        final_row = _get_account_row(conn, account_id)
+        if final_row is None:
+            raise KeyError(f"Account not found after sync: {account_id}")
+        return _row_to_state(final_row)
+
+
+def sync_account_rate_limit_percentages(
+    account_id: str,
+    *,
+    primary_used_percent: float | None,
+    primary_resets_at: str | None = None,
+    secondary_used_percent: float | None = None,
+    secondary_resets_at: str | None = None,
+    provider_account_id: str | None = None,
+    name: str | None = None,
+    now: datetime | None = None,
+    db_path: Path | None = None,
+) -> AccountUsageState:
+    now_dt = _as_utc(now)
+    now_iso = _to_iso(now_dt)
+
+    def _clamp_percent(value: float | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            val = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(100.0, val))
+
+    p1 = _clamp_percent(primary_used_percent)
+    p2 = _clamp_percent(secondary_used_percent)
+
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        row = _get_account_row(conn, account_id)
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO accounts (
+                    id,
+                    provider_account_id,
+                    name,
+                    rate_limit_window_type,
+                    usage_limit,
+                    usage_in_window,
+                    rate_limit_refresh_at,
+                    rate_limit_last_refreshed_at,
+                    primary_used_percent,
+                    primary_resets_at,
+                    secondary_used_percent,
+                    secondary_resets_at,
+                    last_usage_sync_at,
+                    lifetime_used,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    account_id,
+                    provider_account_id,
+                    name,
+                    DEFAULT_WINDOW_TYPE,
+                    _to_iso(_next_boundary(now_dt, DEFAULT_WINDOW_TYPE)),
+                    now_iso,
+                    p1,
+                    primary_resets_at,
+                    p2,
+                    secondary_resets_at,
+                    now_iso,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        else:
+            updates: list[str] = []
+            params: list[Any] = []
+            if provider_account_id is not None and provider_account_id != row["provider_account_id"]:
+                updates.append("provider_account_id = ?")
+                params.append(provider_account_id)
+            if name is not None and name != row["name"]:
+                updates.append("name = ?")
+                params.append(name)
+            updates.append("primary_used_percent = ?")
+            params.append(p1)
+            if primary_resets_at is not None:
+                updates.append("primary_resets_at = ?")
+                params.append(primary_resets_at)
+            updates.append("secondary_used_percent = ?")
+            params.append(p2)
+            if secondary_resets_at is not None:
+                updates.append("secondary_resets_at = ?")
+                params.append(secondary_resets_at)
+            updates.append("rate_limit_last_refreshed_at = ?")
+            params.append(now_iso)
+            updates.append("last_usage_sync_at = ?")
+            params.append(now_iso)
+            updates.append("updated_at = ?")
+            params.append(now_iso)
+            params.append(account_id)
+            conn.execute(
+                f"UPDATE accounts SET {', '.join(updates)} WHERE id = ?",
+                tuple(params),
+            )
+
         final_row = _get_account_row(conn, account_id)
         if final_row is None:
             raise KeyError(f"Account not found after sync: {account_id}")
@@ -574,6 +684,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             usage_in_window INTEGER NOT NULL DEFAULT 0,
             rate_limit_refresh_at TEXT NOT NULL,
             rate_limit_last_refreshed_at TEXT NULL,
+            primary_used_percent REAL NULL,
+            primary_resets_at TEXT NULL,
+            secondary_used_percent REAL NULL,
+            secondary_resets_at TEXT NULL,
             last_usage_sync_at TEXT NULL,
             lifetime_used INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
@@ -591,6 +705,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         ("usage_in_window", "INTEGER NOT NULL DEFAULT 0"),
         ("rate_limit_refresh_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'"),
         ("rate_limit_last_refreshed_at", "TEXT NULL"),
+        ("primary_used_percent", "REAL NULL"),
+        ("primary_resets_at", "TEXT NULL"),
+        ("secondary_used_percent", "REAL NULL"),
+        ("secondary_resets_at", "TEXT NULL"),
         ("last_usage_sync_at", "TEXT NULL"),
         ("lifetime_used", "INTEGER NOT NULL DEFAULT 0"),
         ("created_at", "TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'"),
@@ -673,6 +791,22 @@ def _row_to_state(row: sqlite3.Row) -> AccountUsageState:
             str(row["rate_limit_last_refreshed_at"])
             if row["rate_limit_last_refreshed_at"] is not None
             else None
+        ),
+        primary_used_percent=(
+            float(row["primary_used_percent"])
+            if row["primary_used_percent"] is not None
+            else None
+        ),
+        primary_resets_at=(
+            str(row["primary_resets_at"]) if row["primary_resets_at"] is not None else None
+        ),
+        secondary_used_percent=(
+            float(row["secondary_used_percent"])
+            if row["secondary_used_percent"] is not None
+            else None
+        ),
+        secondary_resets_at=(
+            str(row["secondary_resets_at"]) if row["secondary_resets_at"] is not None else None
         ),
         last_usage_sync_at=(
             str(row["last_usage_sync_at"]) if row["last_usage_sync_at"] is not None else None

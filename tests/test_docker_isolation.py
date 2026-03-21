@@ -10,7 +10,7 @@ class DockerIsolationTests(unittest.TestCase):
         self.assertIn("- codex_auth:/root/.codex", compose)
         self.assertIn("- codex_switch:/root/.codex-switch", compose)
         self.assertNotIn("- ~/.codex:/root/.codex", compose)
-        self.assertNotIn("- ./", compose)
+        self.assertNotIn("- ~/.codex-switch", compose)
 
 
 if __name__ == "__main__":

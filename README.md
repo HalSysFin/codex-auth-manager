@@ -75,7 +75,10 @@ Current Codex CLI handoff note:
 Core:
 - `GET /health`
 - `GET /` and `GET /ui` frontend app shell (React build)
-- `GET /api/accounts` list saved accounts + rate limit probes
+- `GET /api/accounts` fast cached snapshot (profiles + SQLite usage; no blocking live probes)
+- `GET /api/accounts/cached` same cached snapshot endpoint
+- `GET /api/accounts/stream` SSE live refresh stream (`snapshot`, `account_update`, `aggregate_update`, `complete`, `error`)
+- `GET /api/usage/aggregate` aggregated cached usage summary
 - `GET /auth/rate-limits` read active Codex session ChatGPT rate limits via `codex app-server`
 - `POST /auth/login/start` start Codex CLI login
 - `GET /auth/login/status` login status (`wait_seconds` and optional `session_id`)
@@ -209,3 +212,7 @@ Shortcuts:
 - Open popup (browser action): `Ctrl+Shift+Y` (macOS: `Command+Shift+Y`)
 - Start relay login directly: `Ctrl+Shift+L` (macOS: `Command+Shift+L`)
 - Customize shortcuts at `chrome://extensions/shortcuts`.
+UI load behavior:
+- First paint uses cached DB-backed snapshot (`/api/accounts/cached`) for fast render.
+- Live account usage refresh runs asynchronously via `/api/accounts/stream`.
+- SQLite remains the source of last-known state; live probes only improve freshness.

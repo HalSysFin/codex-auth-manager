@@ -13,11 +13,11 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .accounts import AccountProfile, list_profiles
@@ -39,6 +39,7 @@ from .account_usage_store import (
     rename_account_data,
     record_account_usage,
     reconcile_due_accounts,
+    sync_account_rate_limit_percentages,
     sync_account_usage_snapshot,
 )
 from .auth_store import (
@@ -79,9 +80,13 @@ from .login_sessions import (
 app = FastAPI(title="Codex Auth Manager", version="0.2.0")
 logger = logging.getLogger(__name__)
 _RECONCILE_INTERVAL_SECONDS = 600
+_LIVE_REFRESH_CONCURRENCY = 4
+_USAGE_STALE_SECONDS = 1800
 _reconcile_task: asyncio.Task[None] | None = None
 LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+_LAST_REFRESH_STATUS_BY_KEY: dict[str, dict[str, Any]] = {}
+_LAST_REFRESH_COMPLETED_AT: str | None = None
 
 if (_FRONTEND_DIST / "assets").exists():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="frontend-assets")
@@ -143,14 +148,7 @@ async def web_login_guard(request: Request, call_next):
         return await call_next(request)
     if _has_valid_web_session(request):
         return await call_next(request)
-
-    if request.url.path.startswith("/api/") or request.url.path.startswith("/auth/"):
-        return JSONResponse({"detail": "Login required"}, status_code=401)
-
-    next_path = request.url.path
-    if request.url.query:
-        next_path = f"{next_path}?{request.url.query}"
-    return RedirectResponse(url=f"/login?next={quote(next_path, safe='/?=&')}", status_code=303)
+    return JSONResponse({"detail": "Login required"}, status_code=401)
 
 
 @app.get("/health")
@@ -159,70 +157,63 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/login")
-async def login_page(next: str = "/") -> HTMLResponse:
-    if not _web_login_enabled():
-        return RedirectResponse(url=next or "/", status_code=303)
-    return HTMLResponse(_render_login(next))
+async def login_page() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI login is disabled. Use the React frontend and API authentication."},
+        status_code=410,
+    )
 
 
 @app.post("/login")
-async def login_submit(request: Request) -> RedirectResponse:
-    if not _web_login_enabled():
-        return RedirectResponse(url="/", status_code=303)
-
-    content_type = request.headers.get("content-type", "")
-    username = ""
-    password = ""
-    next_path = "/"
-
-    if "application/json" in content_type:
-        payload = await request.json()
-        if isinstance(payload, dict):
-            username = str(payload.get("username", "")).strip()
-            password = str(payload.get("password", ""))
-            next_path = str(payload.get("next", "/")) or "/"
-    else:
-        raw = (await request.body()).decode("utf-8", errors="replace")
-        parsed = parse_qs(raw, keep_blank_values=True)
-        username = (parsed.get("username", [""])[0] or "").strip()
-        password = parsed.get("password", [""])[0] or ""
-        next_path = parsed.get("next", ["/"])[0] or "/"
-
-    if not _verify_web_credentials(username, password):
-        return RedirectResponse(
-            url=f"/login?next={quote(next_path, safe='/?=&')}&error=1", status_code=303
-        )
-
-    response = RedirectResponse(url=_safe_next_path(next_path), status_code=303)
-    _set_web_session_cookie(request, response)
-    return response
+async def login_submit() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI login is disabled. Use the React frontend and API authentication."},
+        status_code=410,
+    )
 
 
 @app.post("/logout")
-async def logout(request: Request) -> RedirectResponse:
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie(settings.web_login_cookie_name, path="/")
-    return response
+async def logout() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI logout is disabled. Use the React frontend session flow."},
+        status_code=410,
+    )
 
 
 @app.get("/")
-async def index() -> HTMLResponse:
-    return _spa_or_legacy_index()
+async def index() -> JSONResponse:
+    return JSONResponse(
+        {
+            "service": "codex-auth-manager-api",
+            "ui": "Use the React frontend service for UI.",
+            "health": "/health",
+            "docs": "/docs",
+        }
+    )
 
 
 @app.get("/ui")
-async def ui() -> HTMLResponse:
-    return _spa_or_legacy_index()
+async def ui() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI is disabled. Use the React frontend service."},
+        status_code=410,
+    )
 
 
 @app.get("/ui/accounts/{label}")
-async def ui_account_usage(label: str) -> HTMLResponse:
-    return HTMLResponse(_render_account_usage_page(label))
+async def ui_account_usage(label: str) -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI is disabled. Use the React frontend service."},
+        status_code=410,
+    )
 
 
 @app.get("/ui/stats")
-async def ui_usage_stats() -> HTMLResponse:
-    return HTMLResponse(_render_usage_stats_page())
+async def ui_usage_stats() -> JSONResponse:
+    return JSONResponse(
+        {"detail": "Backend UI is disabled. Use the React frontend service."},
+        status_code=410,
+    )
 
 
 @app.get("/oauth/callback")
@@ -945,52 +936,100 @@ async def exchange_code(request: Request, payload: dict[str, Any]) -> JSONRespon
 @app.get("/api/accounts")
 async def api_accounts(request: Request) -> JSONResponse:
     _require_internal_auth(request)
+    snapshot = _build_cached_accounts_snapshot()
+    return JSONResponse(snapshot)
+
+
+@app.get("/api/accounts/cached")
+async def api_accounts_cached(request: Request) -> JSONResponse:
+    _require_internal_auth(request)
+    snapshot = _build_cached_accounts_snapshot()
+    return JSONResponse(snapshot)
+
+
+@app.get("/api/accounts/stream")
+async def api_accounts_stream(request: Request) -> StreamingResponse:
+    _require_internal_auth_or_query(request)
     profiles = _dedupe_profiles(list_profiles())
-    _touch_profiles_usage(profiles)
+    snapshot = _build_cached_accounts_snapshot(profiles=profiles)
+    event_headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
 
-    current = None
-    try:
-        current = _resolve_current_label(read_current_auth(), profiles)
-    except CodexCLIError:
-        current = None
-
-    probe_by_label: dict[str, dict[str, Any]] = {}
-    async with httpx.AsyncClient(timeout=10) as client:
-        for profile in profiles:
-            if profile.access_token:
-                rate_info = await _fetch_rate_limits(client, profile.access_token)
-            else:
-                rate_info = {"error": "No access token found"}
-            probe_by_label[profile.label] = rate_info
-            if isinstance(rate_info, dict):
-                _sync_profile_usage_from_probe(profile, rate_info)
-
-    session_by_label = _fetch_session_limits_for_profiles(
-        profiles, baseline_auth=_safe_read_current_auth()
-    )
-
-    results: list[dict[str, Any]] = []
-    for profile in profiles:
-        rate_info = probe_by_label.get(profile.label, {})
-        if _has_limit_data(rate_info):
-            final_rate_info = rate_info
-        else:
-            final_rate_info = session_by_label.get(profile.label, rate_info)
-            _sync_profile_usage_from_session_limits(profile, final_rate_info)
-
-        results.append(
+    async def _event_gen():
+        yield _sse_event(
+            "snapshot",
             {
-                "label": profile.label,
-                "account_key": profile.account_key,
-                "display_label": _display_label(profile.label, profile.email),
-                "email": profile.email,
-                "is_current": profile.label == current,
-                "rate_limits": final_rate_info,
-                "usage_tracking": _usage_tracking_payload(profile.account_key),
-            }
+                "accounts": snapshot["accounts"],
+                "current_label": snapshot["current_label"],
+                "aggregate": snapshot["aggregate"],
+                "pending_labels": [p.label for p in profiles],
+            },
         )
+        if not profiles:
+            yield _sse_event("complete", {"completed": 0, "failed": 0})
+            return
 
-    return JSONResponse({"accounts": results, "current_label": current})
+        latest_by_label = {item["label"]: dict(item) for item in snapshot["accounts"]}
+        baseline_auth = _safe_read_current_auth()
+        session_limits_by_label = _fetch_session_limits_for_profiles(profiles, baseline_auth)
+        completed = 0
+        failed = 0
+
+        for profile in profiles:
+            rate_info = session_limits_by_label.get(profile.label) or {"error": "No rate-limit data returned"}
+            try:
+                if isinstance(rate_info, dict) and isinstance(rate_info.get("error"), str):
+                    error_msg = str(rate_info.get("error"))
+                    _mark_refresh_status(profile.account_key, ok=False, error=error_msg)
+                    usage = _usage_tracking_payload(profile.account_key)
+                    account_payload = _account_payload(profile, snapshot["current_label"], usage_tracking=usage)
+                    account_payload["rate_limits"] = {"error": error_msg}
+                    ok = False
+                else:
+                    if isinstance(rate_info, dict):
+                        _sync_profile_usage_from_session_limits(profile, rate_info)
+                    usage = _usage_tracking_payload(profile.account_key)
+                    account_payload = _account_payload(profile, snapshot["current_label"], usage_tracking=usage)
+                    if isinstance(rate_info, dict):
+                        account_payload["rate_limits"] = rate_info
+                    _mark_refresh_status(profile.account_key, ok=True, error=None)
+                    ok = True
+            except Exception as exc:
+                _mark_refresh_status(profile.account_key, ok=False, error=str(exc))
+                usage = _usage_tracking_payload(profile.account_key)
+                account_payload = _account_payload(profile, snapshot["current_label"], usage_tracking=usage)
+                account_payload["rate_limits"] = {"error": str(exc)}
+                ok = False
+
+            latest_by_label[profile.label] = account_payload
+            completed += 1
+            if not ok:
+                failed += 1
+                rate_obj = account_payload.get("rate_limits")
+                error_msg = None
+                if isinstance(rate_obj, dict):
+                    maybe_error = rate_obj.get("error")
+                    if isinstance(maybe_error, str):
+                        error_msg = maybe_error
+                yield _sse_event(
+                    "error",
+                    {
+                        "label": profile.label,
+                        "account_key": account_payload.get("account_key"),
+                        "message": error_msg,
+                    },
+                )
+            aggregate = _compute_aggregate(list(latest_by_label.values()))
+            yield _sse_event("account_update", {"account": account_payload, "ok": ok})
+            yield _sse_event("aggregate_update", aggregate)
+
+        _mark_refresh_completed()
+        yield _sse_event("complete", {"completed": completed, "failed": failed})
+
+    return StreamingResponse(_event_gen(), media_type="text/event-stream", headers=event_headers)
 
 
 @app.get("/api/accounts/{label}/usage-history")
@@ -1080,6 +1119,13 @@ async def api_usage_stats(request: Request) -> JSONResponse:
             "daily_rollover_trend": _daily_rollover_trend(all_rollovers),
         }
     )
+
+
+@app.get("/api/usage/aggregate")
+async def api_usage_aggregate(request: Request) -> JSONResponse:
+    _require_internal_auth(request)
+    snapshot = _build_cached_accounts_snapshot()
+    return JSONResponse({"aggregate": snapshot["aggregate"], "current_label": snapshot["current_label"]})
 
 
 @app.get("/api/public-stats")
@@ -1282,6 +1328,183 @@ def _has_valid_internal_api_token(request: Request) -> bool:
     return False
 
 
+def _require_internal_auth_or_query(request: Request) -> None:
+    if _has_valid_internal_api_token(request):
+        return
+    configured_token = (settings.internal_api_token or "").strip()
+    if not configured_token:
+        return
+    query_token = str(
+        request.query_params.get("api_key")
+        or request.query_params.get("token")
+        or ""
+    ).strip()
+    if query_token and secrets.compare_digest(query_token, configured_token):
+        return
+    raise HTTPException(status_code=401, detail="API key required for stream endpoint.")
+
+
+def _build_cached_accounts_snapshot(
+    *,
+    profiles: list[AccountProfile] | None = None,
+) -> dict[str, Any]:
+    profs = _dedupe_profiles(profiles if profiles is not None else list_profiles())
+    current = None
+    try:
+        current = _resolve_current_label(read_current_auth(), profs)
+    except CodexCLIError:
+        current = None
+
+    accounts = [
+        _account_payload(profile, current, usage_tracking=_usage_tracking_payload(profile.account_key))
+        for profile in profs
+    ]
+    aggregate = _compute_aggregate(accounts)
+    return {"accounts": accounts, "current_label": current, "aggregate": aggregate}
+
+
+def _account_payload(
+    profile: AccountProfile,
+    current_label_name: str | None,
+    *,
+    usage_tracking: dict[str, Any] | None,
+) -> dict[str, Any]:
+    refresh_status = _refresh_status_payload(profile.account_key, usage_tracking)
+    usage_limit = int((usage_tracking or {}).get("usage_limit") or 0)
+    usage_used = int((usage_tracking or {}).get("usage_in_window") or 0)
+    cached_primary_percent = (usage_tracking or {}).get("primary_used_percent")
+    cached_secondary_percent = (usage_tracking or {}).get("secondary_used_percent")
+    percent = (
+        float(cached_primary_percent)
+        if isinstance(cached_primary_percent, (int, float))
+        else (round((usage_used / usage_limit) * 100, 1) if usage_limit > 0 else 0.0)
+    )
+    primary_reset = (usage_tracking or {}).get("primary_resets_at") or (usage_tracking or {}).get("rate_limit_refresh_at")
+    secondary_reset = (usage_tracking or {}).get("secondary_resets_at")
+    rate_limits = {
+        "primary": {
+            "limit": usage_limit,
+            "used": usage_used,
+            "remaining": max(usage_limit - usage_used, 0),
+            "percent": percent,
+            "resetsAt": primary_reset,
+        },
+        "secondary": (
+            {
+                "limit": None,
+                "used": None,
+                "remaining": None,
+                "percent": float(cached_secondary_percent),
+                "resetsAt": secondary_reset,
+            }
+            if isinstance(cached_secondary_percent, (int, float))
+            else None
+        ),
+    }
+    return {
+        "label": profile.label,
+        "account_key": profile.account_key,
+        "display_label": _display_label(profile.label, profile.email),
+        "email": profile.email,
+        "is_current": profile.label == current_label_name,
+        "rate_limits": rate_limits,
+        "usage_tracking": usage_tracking,
+        "refresh_status": refresh_status,
+    }
+
+
+def _compute_aggregate(accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    total_used = 0
+    total_limit = 0
+    lifetime_used = 0
+    total_wasted = 0
+    stale_count = 0
+    failed_count = 0
+    last_refresh: str | None = None
+
+    for account in accounts:
+        usage = account.get("usage_tracking") or {}
+        total_used += int(usage.get("usage_in_window") or 0)
+        total_limit += int(usage.get("usage_limit") or 0)
+        lifetime_used += int(usage.get("lifetime_used") or 0)
+        refresh_status = account.get("refresh_status") or {}
+        if refresh_status.get("is_stale"):
+            stale_count += 1
+        if refresh_status.get("state") == "failed":
+            failed_count += 1
+        last_success_at = refresh_status.get("last_success_at")
+        if isinstance(last_success_at, str):
+            if last_refresh is None or last_success_at > last_refresh:
+                last_refresh = last_success_at
+        rollovers = list_usage_rollovers(str(account.get("account_key") or ""))
+        total_wasted += sum(int(item.get("usage_wasted") or 0) for item in rollovers)
+
+    remaining = max(total_limit - total_used, 0)
+    utilization = round((total_used / total_limit) * 100, 2) if total_limit > 0 else 0.0
+    return {
+        "accounts": len(accounts),
+        "total_current_window_used": total_used,
+        "total_current_window_limit": total_limit,
+        "total_remaining": remaining,
+        "aggregate_utilization_percent": utilization,
+        "lifetime_total_used": lifetime_used,
+        "total_wasted": total_wasted,
+        "stale_accounts": stale_count,
+        "failed_accounts": failed_count,
+        "last_refresh_time": _LAST_REFRESH_COMPLETED_AT or last_refresh,
+    }
+
+
+def _sse_event(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _refresh_status_payload(
+    account_key: str,
+    usage_tracking: dict[str, Any] | None,
+) -> dict[str, Any]:
+    status = dict(_LAST_REFRESH_STATUS_BY_KEY.get(account_key) or {})
+    status.setdefault("state", "idle")
+    status.setdefault("last_attempt_at", None)
+    status.setdefault("last_success_at", None)
+    status.setdefault("last_error", None)
+
+    updated_at = (
+        (usage_tracking or {}).get("last_usage_sync_at")
+        or (usage_tracking or {}).get("updated_at")
+    )
+    is_stale = True
+    if isinstance(updated_at, str):
+        with suppress(ValueError):
+            dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            age = (datetime.now(timezone.utc) - dt).total_seconds()
+            is_stale = age > _USAGE_STALE_SECONDS
+    status["is_stale"] = is_stale
+    return status
+
+
+def _mark_refresh_status(account_key: str, *, ok: bool, error: str | None) -> None:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state = "ok" if ok else "failed"
+    entry = _LAST_REFRESH_STATUS_BY_KEY.setdefault(account_key, {})
+    entry["state"] = state
+    entry["last_attempt_at"] = now_iso
+    if ok:
+        entry["last_success_at"] = now_iso
+        entry["last_error"] = None
+    else:
+        entry["last_error"] = error
+
+
+def _mark_refresh_completed() -> None:
+    global _LAST_REFRESH_COMPLETED_AT
+    _LAST_REFRESH_COMPLETED_AT = datetime.now(timezone.utc).isoformat()
+
+
 def _web_login_enabled() -> bool:
     return bool(
         (settings.web_login_username or "").strip()
@@ -1291,7 +1514,9 @@ def _web_login_enabled() -> bool:
 
 
 def _is_login_exempt_path(path: str) -> bool:
-    if path in {"/health", "/login"}:
+    if path in {"/", "/health", "/login", "/ui"}:
+        return True
+    if path.startswith("/ui/"):
         return True
     if path.startswith("/oauth/callback") or path.startswith("/auth/callback"):
         return True
@@ -1590,6 +1815,33 @@ def _sync_profile_usage_from_probe(profile: AccountProfile, rate_info: dict[str,
 
 def _sync_profile_usage_from_session_limits(profile: AccountProfile, rate_info: dict[str, Any]) -> None:
     snapshot = _extract_limit_snapshot(rate_info)
+    primary = rate_info.get("primary") if isinstance(rate_info, dict) and isinstance(rate_info.get("primary"), dict) else None
+    secondary = rate_info.get("secondary") if isinstance(rate_info, dict) and isinstance(rate_info.get("secondary"), dict) else None
+    primary_percent = _find_float(primary, {"used_percent", "usedpercent", "percent", "usedpct"})
+    secondary_percent = _find_float(secondary, {"used_percent", "usedpercent", "percent", "usedpct"})
+    primary_resets_at = _find_datetime_any(primary, {"resets_at", "resetsat", "reset_at", "resetat", "next_reset_at", "nextresetat", "refresh_at", "refreshat"})
+    secondary_resets_at = _find_datetime_any(secondary, {"resets_at", "resetsat", "reset_at", "resetat", "next_reset_at", "nextresetat", "refresh_at", "refreshat"})
+
+    if (
+        primary_percent is not None
+        or secondary_percent is not None
+        or primary_resets_at is not None
+        or secondary_resets_at is not None
+    ):
+        try:
+            sync_account_rate_limit_percentages(
+                profile.account_key,
+                primary_used_percent=primary_percent,
+                primary_resets_at=primary_resets_at,
+                secondary_used_percent=secondary_percent,
+                secondary_resets_at=secondary_resets_at,
+                provider_account_id=profile.provider_account_id,
+                name=profile.name or profile.email,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception:
+            logger.exception("Unable to sync percentage limits for key=%s", profile.account_key)
+
     if (
         snapshot["usage_limit"] is None
         and snapshot["usage_used"] is None
@@ -1673,6 +1925,23 @@ def _find_int(payload: Any, keys: set[str]) -> int | None:
     return None
 
 
+def _find_float(payload: Any, keys: set[str]) -> float | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = key.lower().replace("-", "_")
+            if normalized in keys and isinstance(value, (int, float)):
+                return float(value)
+            found = _find_float(value, keys)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_float(item, keys)
+            if found is not None:
+                return found
+    return None
+
+
 def _find_str(payload: Any, keys: set[str]) -> str | None:
     if isinstance(payload, dict):
         for key, value in payload.items():
@@ -1706,6 +1975,42 @@ def _find_iso_datetime(payload: Any, keys: set[str]) -> str | None:
     return dt.isoformat()
 
 
+def _find_datetime_any(payload: Any, keys: set[str]) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            normalized = key.lower().replace("-", "_")
+            if normalized in keys:
+                if isinstance(value, (int, float)) and int(value) > 0:
+                    dt = datetime.fromtimestamp(int(value), tz=timezone.utc)
+                    return dt.isoformat()
+                if isinstance(value, str):
+                    candidate = value.strip()
+                    if not candidate:
+                        continue
+                    if candidate.isdigit():
+                        dt = datetime.fromtimestamp(int(candidate), tz=timezone.utc)
+                        return dt.isoformat()
+                    candidate = candidate.replace("Z", "+00:00")
+                    try:
+                        dt = datetime.fromisoformat(candidate)
+                    except ValueError:
+                        continue
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    else:
+                        dt = dt.astimezone(timezone.utc)
+                    return dt.isoformat()
+            found = _find_datetime_any(value, keys)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _find_datetime_any(item, keys)
+            if found:
+                return found
+    return None
+
+
 def _account_provider_id(account_payload: dict[str, Any] | None) -> str | None:
     if not isinstance(account_payload, dict):
         return None
@@ -1736,6 +2041,10 @@ def _usage_tracking_payload(account_key: str) -> dict[str, Any] | None:
         "lifetime_used": state.lifetime_used,
         "rate_limit_refresh_at": state.rate_limit_refresh_at,
         "rate_limit_last_refreshed_at": state.rate_limit_last_refreshed_at,
+        "primary_used_percent": state.primary_used_percent,
+        "primary_resets_at": state.primary_resets_at,
+        "secondary_used_percent": state.secondary_used_percent,
+        "secondary_resets_at": state.secondary_resets_at,
         "last_usage_sync_at": state.last_usage_sync_at,
         "created_at": state.created_at,
         "updated_at": state.updated_at,
@@ -3195,6 +3504,55 @@ def _render_index() -> str:
         });
       }
 
+      function parseResetDate(data) {
+        if (!data || typeof data !== "object") return null;
+        const raw = data.resetsAt ?? data.resetAt ?? data.nextResetAt ?? data.reset;
+        if (raw === undefined || raw === null || raw === "") return null;
+        let d = null;
+        if (typeof raw === "number" && Number.isFinite(raw)) {
+          d = new Date(raw * 1000);
+        } else if (typeof raw === "string") {
+          const trimmed = raw.trim();
+          if (!trimmed) return null;
+          if (/^\d+$/.test(trimmed)) d = new Date(Number(trimmed) * 1000);
+          else d = new Date(trimmed);
+        }
+        if (!d || Number.isNaN(d.getTime())) return null;
+        return d;
+      }
+
+      function formatRefreshCountdown(msRemaining) {
+        if (!Number.isFinite(msRemaining)) return "refresh --";
+        if (msRemaining <= 60000) return "refresh due";
+        const totalMin = Math.floor(msRemaining / 60000);
+        const days = Math.floor(totalMin / (60 * 24));
+        const hours = Math.floor((totalMin % (60 * 24)) / 60);
+        const mins = totalMin % 60;
+        if (days > 0) return `refresh ${days}d ${hours}h`;
+        if (hours > 0) return `refresh ${hours}h ${mins}m`;
+        return `refresh ${mins}m`;
+      }
+
+      function refreshBadge(primary, secondary) {
+        const now = Date.now();
+        const resets = [parseResetDate(primary), parseResetDate(secondary)]
+          .filter((d) => d instanceof Date)
+          .map((d) => d.getTime());
+        if (!resets.length) return "";
+
+        const soonest = Math.min(...resets);
+        const msRemaining = soonest - now;
+        const minMs = 60 * 1000;
+        const maxMs = 7 * 24 * 60 * 60 * 1000;
+        const clamped = Math.max(minMs, Math.min(maxMs, msRemaining));
+        const ratio = (clamped - minMs) / (maxMs - minMs);
+        const hue = Math.round(ratio * 120);
+        const color = `hsl(${hue}, 82%, 55%)`;
+        const bg = `hsla(${hue}, 82%, 55%, 0.14)`;
+        const label = formatRefreshCountdown(msRemaining);
+        return `<span class="pill" style="margin-left:8px;color:${color};border-color:${bg};background:${bg}">${label}</span>`;
+      }
+
       /* ── render helpers ─────────────────── */
       function limitBar(label, data) {
         if (!data) return "";
@@ -3234,9 +3592,10 @@ def _render_index() -> str:
               : '<span style="color:var(--dim);font-size:.8rem">No limit data</span>'
           );
         const resetHtml = resetRows(prim, sec);
+        const activeBadge = isActive ? refreshBadge(prim, sec) : "";
 
         return `<tr>
-          <td data-label="Profile"><a class="profile-link" href="/ui/accounts/${encodeURIComponent(account.label)}"><div class="acct-name">${displayLabel} ${isActive ? '<span class="pill active" style="margin-left:8px">Current</span>' : ""}</div><div class="acct-email">${email}</div><div class="acct-label">Profile label: ${account.label}</div></a></td>
+          <td data-label="Profile"><a class="profile-link" href="/ui/accounts/${encodeURIComponent(account.label)}"><div class="acct-name">${displayLabel} ${activeBadge}</div><div class="acct-email">${email}</div><div class="acct-label">Profile label: ${account.label}</div></a></td>
           <td data-label="Rate Limits">${limitsHtml}</td>
           <td data-label="Rate Limit Reset">${resetHtml}</td>
           <td data-label="Actions"><div class="acct-actions">
