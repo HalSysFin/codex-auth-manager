@@ -300,6 +300,30 @@ def sync_account_usage_snapshot(
         final_row = _get_account_row(conn, account_id)
         if final_row is None:
             raise KeyError(f"Account not found after sync: {account_id}")
+        conn.execute(
+            """
+            INSERT INTO usage_absolute_snapshots (
+                account_id,
+                captured_at,
+                usage_in_window,
+                usage_limit,
+                lifetime_used,
+                rate_limit_refresh_at,
+                primary_used_percent,
+                secondary_used_percent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                now_iso,
+                int(final_row["usage_in_window"]),
+                int(final_row["usage_limit"]),
+                int(final_row["lifetime_used"]),
+                str(final_row["rate_limit_refresh_at"]) if final_row["rate_limit_refresh_at"] is not None else None,
+                float(final_row["primary_used_percent"]) if final_row["primary_used_percent"] is not None else None,
+                float(final_row["secondary_used_percent"]) if final_row["secondary_used_percent"] is not None else None,
+            ),
+        )
         return _row_to_state(final_row)
 
 
@@ -406,6 +430,30 @@ def sync_account_rate_limit_percentages(
         final_row = _get_account_row(conn, account_id)
         if final_row is None:
             raise KeyError(f"Account not found after sync: {account_id}")
+        conn.execute(
+            """
+            INSERT INTO usage_absolute_snapshots (
+                account_id,
+                captured_at,
+                usage_in_window,
+                usage_limit,
+                lifetime_used,
+                rate_limit_refresh_at,
+                primary_used_percent,
+                secondary_used_percent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                now_iso,
+                int(final_row["usage_in_window"]),
+                int(final_row["usage_limit"]),
+                int(final_row["lifetime_used"]),
+                str(final_row["rate_limit_refresh_at"]) if final_row["rate_limit_refresh_at"] is not None else None,
+                float(final_row["primary_used_percent"]) if final_row["primary_used_percent"] is not None else None,
+                float(final_row["secondary_used_percent"]) if final_row["secondary_used_percent"] is not None else None,
+            ),
+        )
         return _row_to_state(final_row)
 
 
@@ -487,6 +535,78 @@ def list_usage_snapshots(
                 "SELECT * FROM usage_snapshots WHERE captured_at >= ? ORDER BY captured_at ASC",
                 (cutoff,),
             ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def record_absolute_usage_snapshot(
+    account_id: str,
+    *,
+    usage_in_window: int | None,
+    usage_limit: int | None,
+    lifetime_used: int | None,
+    rate_limit_refresh_at: str | None,
+    primary_used_percent: float | None = None,
+    secondary_used_percent: float | None = None,
+    now: datetime | None = None,
+    db_path: Path | None = None,
+) -> None:
+    now_iso = _to_iso(_as_utc(now))
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO usage_absolute_snapshots (
+                account_id,
+                captured_at,
+                usage_in_window,
+                usage_limit,
+                lifetime_used,
+                rate_limit_refresh_at,
+                primary_used_percent,
+                secondary_used_percent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                now_iso,
+                int(usage_in_window) if usage_in_window is not None else None,
+                int(usage_limit) if usage_limit is not None else None,
+                int(lifetime_used) if lifetime_used is not None else None,
+                rate_limit_refresh_at,
+                float(primary_used_percent) if primary_used_percent is not None else None,
+                float(secondary_used_percent) if secondary_used_percent is not None else None,
+            ),
+        )
+
+
+def list_absolute_usage_snapshots(
+    *,
+    account_id: str | None = None,
+    since_iso: str | None = None,
+    db_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        clauses: list[str] = []
+        params: list[Any] = []
+        if account_id:
+            clauses.append("account_id = ?")
+            params.append(account_id)
+        if since_iso:
+            clauses.append("captured_at >= ?")
+            params.append(since_iso)
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = conn.execute(
+            f"""
+            SELECT id, account_id, captured_at, usage_in_window, usage_limit, lifetime_used,
+                   rate_limit_refresh_at, primary_used_percent, secondary_used_percent
+            FROM usage_absolute_snapshots
+            {where_sql}
+            ORDER BY captured_at ASC, id ASC
+            """,
+            tuple(params),
+        ).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -814,6 +934,29 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_snapshots_captured ON usage_snapshots(captured_at)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_absolute_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            usage_in_window INTEGER NULL,
+            usage_limit INTEGER NULL,
+            lifetime_used INTEGER NULL,
+            rate_limit_refresh_at TEXT NULL,
+            primary_used_percent REAL NULL,
+            secondary_used_percent REAL NULL,
+            FOREIGN KEY(account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_absolute_snapshots_account_captured ON usage_absolute_snapshots(account_id, captured_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_absolute_snapshots_captured ON usage_absolute_snapshots(captured_at)"
     )
 
     # Add percentage columns to rollovers if missing

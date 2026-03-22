@@ -79,6 +79,8 @@ Core:
 - `GET /api/accounts/cached` same cached snapshot endpoint
 - `GET /api/accounts/stream` SSE live refresh stream (`snapshot`, `account_update`, `aggregate_update`, `complete`, `error`)
 - `GET /api/usage/aggregate` aggregated cached usage summary
+- `GET /api/usage/history?range=7d|30d|90d|all` cluster-wide absolute consumption history (daily + cumulative)
+- `GET /api/accounts/{label}/history?range=7d|30d|90d|all` per-account current state + consumption history + completed windows
 - `GET /auth/rate-limits` read active Codex session ChatGPT rate limits via `codex app-server`
 - `POST /auth/login/start` start Codex CLI login
 - `GET /auth/login/status` login status (`wait_seconds` and optional `session_id`)
@@ -108,7 +110,13 @@ This includes endpoints that expose raw auth JSON or mutate active auth state, i
 - `/internal/auths`
 - `/auth/login/start`
 
-The React frontend stores the API token in `localStorage` key `auth_manager_api_key` for convenience.
+The React frontend stores the optional write/export API token in `localStorage` key `auth_manager_action_api_key`.
+
+For usage analytics, SQLite now stores:
+- Current account state in `accounts`
+- Completed windows in `usage_rollovers`
+- Percentage snapshots in `usage_snapshots` (diagnostic)
+- Absolute snapshots in `usage_absolute_snapshots` (primary analytics source)
 
 ## Public Login Gate (Proxy + Internal Bypass)
 

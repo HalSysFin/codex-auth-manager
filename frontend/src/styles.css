@@ -85,6 +85,8 @@ body{margin:0;background:#0a0a0a;color:#ededed;font-family:Inter,system-ui,sans-
 .history-head{background:#171717;color:#a3a3a3;font-size:.72rem;text-transform:uppercase;font-weight:600}
 .history-row:last-child{border-bottom:none}
 .history-row span{font-size:.85rem}
+.history-head-7{grid-template-columns:1fr 1fr 90px 90px 90px 110px 1fr}
+.history-row-7{grid-template-columns:1fr 1fr 90px 90px 90px 110px 1fr}
 .text-warn{color:#f59e0b}
 .modal-card{width:min(860px,95vw);max-height:80vh;overflow:auto;background:#131313;border:1px solid #2b2b2b;border-radius:12px;padding:16px}
 .modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}

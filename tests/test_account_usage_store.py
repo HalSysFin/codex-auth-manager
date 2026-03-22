@@ -10,8 +10,11 @@ from app.account_usage_store import (
     ensure_account,
     get_account,
     initialize_usage_store,
+    list_absolute_usage_snapshots,
     list_usage_rollovers,
     record_account_usage,
+    record_absolute_usage_snapshot,
+    sync_account_usage_snapshot,
     refresh_account_window_if_needed,
 )
 
@@ -225,6 +228,48 @@ class AccountUsageStoreTests(unittest.TestCase):
         )
         self.assertIsNone(state.provider_account_id)
         self.assertIsNone(state.name)
+
+    def test_absolute_snapshot_roundtrip(self) -> None:
+        now = datetime(2026, 3, 21, 10, 0, tzinfo=timezone.utc)
+        ensure_account(
+            "acct-snap",
+            now=now,
+            usage_limit=200,
+            rate_limit_refresh_at="2026-03-22T00:00:00+00:00",
+            db_path=self.db_path,
+        )
+        record_absolute_usage_snapshot(
+            "acct-snap",
+            usage_in_window=50,
+            usage_limit=200,
+            lifetime_used=350,
+            rate_limit_refresh_at="2026-03-22T00:00:00+00:00",
+            primary_used_percent=25.0,
+            secondary_used_percent=75.0,
+            now=now,
+            db_path=self.db_path,
+        )
+        rows = list_absolute_usage_snapshots(account_id="acct-snap", db_path=self.db_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["usage_in_window"], 50)
+        self.assertEqual(rows[0]["usage_limit"], 200)
+        self.assertEqual(rows[0]["lifetime_used"], 350)
+
+    def test_sync_account_usage_snapshot_records_absolute_snapshot(self) -> None:
+        now = datetime(2026, 3, 21, 10, 0, tzinfo=timezone.utc)
+        sync_account_usage_snapshot(
+            "acct-sync-snap",
+            usage_limit=100,
+            usage_used=10,
+            rate_limit_window_type="daily",
+            rate_limit_refresh_at="2026-03-22T00:00:00+00:00",
+            now=now,
+            db_path=self.db_path,
+        )
+        rows = list_absolute_usage_snapshots(account_id="acct-sync-snap", db_path=self.db_path)
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertEqual(rows[-1]["usage_in_window"], 10)
+        self.assertEqual(rows[-1]["usage_limit"], 100)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -33,6 +33,7 @@ from .account_usage_store import (
     ensure_account,
     get_account,
     initialize_usage_store,
+    list_absolute_usage_snapshots,
     list_usage_rollovers,
     list_usage_snapshots,
     merge_account_data,
@@ -1142,6 +1143,245 @@ async def api_usage_aggregate(request: Request) -> JSONResponse:
     _require_internal_auth(request)
     snapshot = _build_cached_accounts_snapshot()
     return JSONResponse({"aggregate": snapshot["aggregate"], "current_label": snapshot["current_label"]})
+
+
+@app.get("/api/usage/history")
+async def api_usage_history(request: Request, range: str = "30d") -> JSONResponse:
+    _require_internal_auth(request)
+    selected_range, since_dt = _parse_history_range(range)
+    since_iso = since_dt.isoformat() if since_dt else None
+
+    profiles = _dedupe_profiles(list_profiles())
+    _touch_profiles_usage(profiles)
+    cached = _build_cached_accounts_snapshot(profiles=profiles)
+    account_label_by_key = {p.account_key: p.label for p in profiles}
+    account_display_by_key = {
+        p.account_key: _display_label(p.label, p.email) or p.label for p in profiles
+    }
+    account_email_by_key = {p.account_key: p.email for p in profiles}
+
+    snapshots = list_absolute_usage_snapshots(account_id=None)
+    per_account_daily = _compute_daily_consumption_per_account(
+        snapshots=snapshots,
+        since_dt=since_dt,
+    )
+    cluster_daily: dict[str, int] = {}
+    for _, day_map in per_account_daily.items():
+        for day, consumed in day_map.items():
+            cluster_daily[day] = cluster_daily.get(day, 0) + int(consumed)
+    daily_series = [{"day": day, "consumed": cluster_daily[day]} for day in sorted(cluster_daily.keys())]
+
+    running = 0
+    cumulative_series: list[dict[str, Any]] = []
+    for item in daily_series:
+        running += int(item["consumed"])
+        cumulative_series.append(
+            {
+                "day": item["day"],
+                "cumulative": running,
+                "consumed": int(item["consumed"]),
+            }
+        )
+
+    rollovers_all: list[dict[str, Any]] = []
+    for profile in profiles:
+        rollovers_all.extend(list_usage_rollovers(profile.account_key))
+    rollovers_filtered = _filter_rollovers_by_range(rollovers_all, since_dt)
+    wasted_bars = _group_rollover_metric_by_day(rollovers_filtered, metric="usage_wasted")
+    daily_used_bars = _group_rollover_metric_by_day(rollovers_filtered, metric="usage_used")
+
+    consumed_by_account = {
+        account_key: sum(day_map.values()) for account_key, day_map in per_account_daily.items()
+    }
+    top_accounts = sorted(consumed_by_account.items(), key=lambda item: item[1], reverse=True)[:10]
+
+    stale_accounts = []
+    failed_accounts = []
+    for account in cached["accounts"]:
+        status = account.get("refresh_status") or {}
+        if status.get("is_stale"):
+            stale_accounts.append(
+                {
+                    "account_key": account.get("account_key"),
+                    "label": account.get("label"),
+                    "display_label": account.get("display_label"),
+                    "email": account.get("email"),
+                    "last_success_at": status.get("last_success_at"),
+                    "last_error": status.get("last_error"),
+                }
+            )
+        if status.get("state") == "failed":
+            failed_accounts.append(
+                {
+                    "account_key": account.get("account_key"),
+                    "label": account.get("label"),
+                    "display_label": account.get("display_label"),
+                    "email": account.get("email"),
+                    "last_attempt_at": status.get("last_attempt_at"),
+                    "last_error": status.get("last_error"),
+                }
+            )
+
+    recent_rollovers = sorted(
+        rollovers_filtered,
+        key=lambda row: str(row.get("rolled_over_at") or row.get("window_ended_at") or ""),
+        reverse=True,
+    )[:20]
+    for row in recent_rollovers:
+        key = str(row.get("account_id") or "")
+        row["label"] = account_label_by_key.get(key, key)
+        row["display_label"] = account_display_by_key.get(key, key)
+        row["email"] = account_email_by_key.get(key)
+
+    consumed_total = sum(int(item["consumed"]) for item in daily_series)
+    selected_days = _selected_day_count(selected_range, daily_series)
+    avg_daily = round(consumed_total / selected_days, 2) if selected_days > 0 else 0.0
+    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in rollovers_filtered)
+
+    return JSONResponse(
+        {
+            "range": selected_range,
+            "summary": {
+                "total_consumed_in_range": consumed_total,
+                "average_daily_consumption": avg_daily,
+                "current_total_used": cached["aggregate"]["total_current_window_used"],
+                "current_total_limit": cached["aggregate"]["total_current_window_limit"],
+                "current_total_remaining": cached["aggregate"]["total_remaining"],
+                "total_wasted": wasted_total,
+                "stale_account_count": len(stale_accounts),
+                "failed_account_count": len(failed_accounts),
+                "last_refresh_time": cached["aggregate"]["last_refresh_time"],
+            },
+            "series": {
+                "cumulative_usage": cumulative_series,
+                "daily_usage": daily_series,
+                "daily_rollover_wasted": wasted_bars,
+                "daily_rollover_used": daily_used_bars,
+            },
+            "sections": {
+                "top_consuming_accounts": [
+                    {
+                        "account_key": account_key,
+                        "label": account_label_by_key.get(account_key, account_key),
+                        "display_label": account_display_by_key.get(account_key, account_key),
+                        "email": account_email_by_key.get(account_key),
+                        "consumed": int(consumed),
+                    }
+                    for account_key, consumed in top_accounts
+                ],
+                "stale_accounts": stale_accounts,
+                "failed_accounts": failed_accounts,
+                "recent_rollovers": recent_rollovers,
+            },
+            "freshness": {
+                "coverage_start": cumulative_series[0]["day"] if cumulative_series else None,
+                "coverage_end": cumulative_series[-1]["day"] if cumulative_series else None,
+                "snapshot_points": len(snapshots),
+                "daily_points": len(daily_series),
+                "is_sparse": len(daily_series) < 3,
+            },
+        }
+    )
+
+
+@app.get("/api/accounts/{label}/history")
+async def api_account_history(request: Request, label: str, range: str = "30d") -> JSONResponse:
+    _require_internal_auth(request)
+    profile = _profile_for_label(label)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Label not found")
+
+    selected_range, since_dt = _parse_history_range(range)
+    _touch_account_usage(profile=profile)
+    usage = _usage_tracking_payload(profile.account_key) or {}
+    rollovers_all = list_usage_rollovers(profile.account_key)
+    rollovers_filtered = _filter_rollovers_by_range(rollovers_all, since_dt)
+    snapshots = list_absolute_usage_snapshots(account_id=profile.account_key)
+    per_account_daily = _compute_daily_consumption_per_account(
+        snapshots=snapshots,
+        since_dt=since_dt,
+    )
+    day_map = per_account_daily.get(profile.account_key, {})
+    daily_series = [{"day": day, "consumed": day_map[day]} for day in sorted(day_map.keys())]
+
+    running = 0
+    cumulative_series: list[dict[str, Any]] = []
+    for item in daily_series:
+        running += int(item["consumed"])
+        cumulative_series.append(
+            {"day": item["day"], "cumulative": running, "consumed": int(item["consumed"])}
+        )
+
+    status = _refresh_status_payload(profile.account_key, usage)
+    current_used = int(usage.get("usage_in_window") or 0)
+    current_limit = int(usage.get("usage_limit") or 0)
+    remaining = max(current_limit - current_used, 0)
+    utilization = round((current_used / current_limit) * 100, 2) if current_limit > 0 else None
+    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in rollovers_filtered)
+    selected_days = _selected_day_count(selected_range, daily_series)
+    avg_daily = round((sum(int(item["consumed"]) for item in daily_series) / selected_days), 2) if selected_days > 0 else 0.0
+
+    completed_windows = sorted(
+        rollovers_filtered,
+        key=lambda row: str(row.get("window_ended_at") or ""),
+        reverse=True,
+    )
+    for row in completed_windows:
+        used = int(row.get("usage_used") or 0)
+        limit = int(row.get("usage_limit") or 0)
+        row["utilization_percent"] = round((used / limit) * 100, 2) if limit > 0 else None
+
+    return JSONResponse(
+        {
+            "label": profile.label,
+            "account_key": profile.account_key,
+            "display_label": _display_label(profile.label, profile.email),
+            "email": profile.email,
+            "range": selected_range,
+            "current_state": {
+                "usage_in_window": current_used,
+                "usage_limit": current_limit,
+                "remaining": remaining,
+                "utilization_percent": utilization,
+                "next_reset": usage.get("rate_limit_refresh_at"),
+                "lifetime_used": int(usage.get("lifetime_used") or 0),
+                "last_sync": usage.get("last_usage_sync_at"),
+                "refresh_status": status,
+            },
+            "consumption_trend": {
+                "cumulative_usage": cumulative_series,
+                "daily_usage": daily_series,
+                "total_consumed_in_range": sum(int(item["consumed"]) for item in daily_series),
+                "average_daily_consumption": avg_daily,
+            },
+            "completed_windows": [
+                {
+                    "window_start": row.get("window_started_at"),
+                    "window_end": row.get("window_ended_at"),
+                    "used": int(row.get("usage_used") or 0),
+                    "limit": int(row.get("usage_limit") or 0),
+                    "wasted": int(row.get("usage_wasted") or 0),
+                    "utilization_percent": row.get("utilization_percent"),
+                    "rolled_over_at": row.get("rolled_over_at"),
+                    "primary_percent_at_reset": row.get("primary_percent_at_reset"),
+                    "secondary_percent_at_reset": row.get("secondary_percent_at_reset"),
+                }
+                for row in completed_windows
+            ],
+            "wastage_series": {
+                "daily_wasted": _group_rollover_metric_by_day(rollovers_filtered, metric="usage_wasted"),
+                "daily_used": _group_rollover_metric_by_day(rollovers_filtered, metric="usage_used"),
+                "total_wasted": wasted_total,
+            },
+            "freshness": {
+                "coverage_start": cumulative_series[0]["day"] if cumulative_series else None,
+                "coverage_end": cumulative_series[-1]["day"] if cumulative_series else None,
+                "snapshot_points": len(snapshots),
+                "daily_points": len(daily_series),
+                "is_sparse": len(daily_series) < 3,
+            },
+        }
+    )
 
 
 @app.get("/api/usage/snapshots")
@@ -2355,6 +2595,97 @@ def _daily_rollover_trend(rollovers: list[dict[str, Any]]) -> list[dict[str, Any
             }
         )
     return points
+
+
+def _parse_history_range(value: str | None) -> tuple[str, datetime | None]:
+    raw = (value or "30d").strip().lower()
+    now = datetime.now(timezone.utc)
+    if raw in {"7d", "7", "week"}:
+        return ("7d", now - timedelta(days=7))
+    if raw in {"30d", "30", "1m", "month"}:
+        return ("30d", now - timedelta(days=30))
+    if raw in {"90d", "90", "3m", "quarter"}:
+        return ("90d", now - timedelta(days=90))
+    if raw in {"all", "*"}:
+        return ("all", None)
+    return ("30d", now - timedelta(days=30))
+
+
+def _compute_daily_consumption_per_account(
+    *,
+    snapshots: list[dict[str, Any]],
+    since_dt: datetime | None,
+) -> dict[str, dict[str, int]]:
+    # Use latest lifetime snapshot per day; day-to-day lifetime deltas become daily consumption.
+    by_account_day_last: dict[str, dict[str, tuple[str, int]]] = {}
+    for row in snapshots:
+        account_id = str(row.get("account_id") or "").strip()
+        captured_at = str(row.get("captured_at") or "").strip()
+        lifetime_raw = row.get("lifetime_used")
+        if not account_id or not captured_at or lifetime_raw is None:
+            continue
+        try:
+            lifetime = int(lifetime_raw)
+        except (TypeError, ValueError):
+            continue
+        day = captured_at[:10]
+        if len(day) != 10:
+            continue
+        day_map = by_account_day_last.setdefault(account_id, {})
+        current = day_map.get(day)
+        if current is None or captured_at > current[0]:
+            day_map[day] = (captured_at, lifetime)
+
+    since_day = since_dt.date().isoformat() if since_dt else None
+    out: dict[str, dict[str, int]] = {}
+    for account_id, day_map in by_account_day_last.items():
+        day_items = sorted(day_map.items(), key=lambda item: item[0])
+        prev_lifetime: int | None = None
+        acc_day: dict[str, int] = {}
+        for day, (_, lifetime) in day_items:
+            delta = 0 if prev_lifetime is None else max(lifetime - prev_lifetime, 0)
+            prev_lifetime = lifetime
+            if since_day is not None and day < since_day:
+                continue
+            acc_day[day] = delta
+        out[account_id] = acc_day
+    return out
+
+
+def _filter_rollovers_by_range(
+    rollovers: list[dict[str, Any]], since_dt: datetime | None
+) -> list[dict[str, Any]]:
+    if since_dt is None:
+        return list(rollovers)
+    since_iso = since_dt.isoformat()
+    return [
+        row
+        for row in rollovers
+        if str(row.get("window_ended_at") or row.get("rolled_over_at") or "") >= since_iso
+    ]
+
+
+def _group_rollover_metric_by_day(
+    rollovers: list[dict[str, Any]], *, metric: str
+) -> list[dict[str, Any]]:
+    buckets: dict[str, int] = {}
+    for row in rollovers:
+        dt = str(row.get("window_ended_at") or row.get("rolled_over_at") or "")
+        day = dt[:10]
+        if len(day) != 10:
+            continue
+        buckets[day] = buckets.get(day, 0) + int(row.get(metric) or 0)
+    return [{"day": day, "value": buckets[day]} for day in sorted(buckets.keys())]
+
+
+def _selected_day_count(selected_range: str, daily_series: list[dict[str, Any]]) -> int:
+    if selected_range == "7d":
+        return 7
+    if selected_range == "30d":
+        return 30
+    if selected_range == "90d":
+        return 90
+    return max(len(daily_series), 1)
 
 
 def _profile_for_label(label: str) -> AccountProfile | None:

@@ -76,26 +76,115 @@ type StreamSnapshot = {
 }
 
 type ViewMode = 'manager' | 'stats'
+type RangeKey = '7d' | '30d' | '90d' | 'all'
+
 type AccountHistoryResponse = {
   label: string
   account_key: string
   display_label: string | null
   email: string | null
-  usage_tracking?: UsageTracking | null
-  rollovers: Array<{
-    window_started_at?: string
-    window_ended_at?: string
-    usage_limit?: number
-    usage_used?: number
-    usage_wasted?: number
+  range: RangeKey
+  current_state: {
+    usage_in_window: number
+    usage_limit: number
+    remaining: number
+    utilization_percent?: number | null
+    next_reset?: string | null
+    lifetime_used: number
+    last_sync?: string | null
+    refresh_status?: RefreshStatus
+  }
+  consumption_trend: {
+    cumulative_usage: Array<{ day: string; cumulative: number; consumed: number }>
+    daily_usage: Array<{ day: string; consumed: number }>
+    total_consumed_in_range: number
+    average_daily_consumption: number
+  }
+  completed_windows: Array<{
+    window_start?: string
+    window_end?: string
+    used: number
+    limit: number
+    wasted: number
+    utilization_percent?: number | null
+    rolled_over_at?: string | null
+    primary_percent_at_reset?: number | null
+    secondary_percent_at_reset?: number | null
   }>
-  summary?: {
-    window_count?: number
-    total_wasted?: number
-    total_used_completed?: number
-    total_limit_completed?: number
-    avg_completed_utilization_percent?: number | null
-    current_wasted_if_rollover_now?: number
+  wastage_series: {
+    daily_wasted: Array<{ day: string; value: number }>
+    daily_used: Array<{ day: string; value: number }>
+    total_wasted: number
+  }
+  freshness: {
+    coverage_start?: string | null
+    coverage_end?: string | null
+    snapshot_points: number
+    daily_points: number
+    is_sparse: boolean
+  }
+}
+
+type UsageHistoryResponse = {
+  range: RangeKey
+  summary: {
+    total_consumed_in_range: number
+    average_daily_consumption: number
+    current_total_used: number
+    current_total_limit: number
+    current_total_remaining: number
+    total_wasted: number
+    stale_account_count: number
+    failed_account_count: number
+    last_refresh_time: string | null
+  }
+  series: {
+    cumulative_usage: Array<{ day: string; cumulative: number; consumed: number }>
+    daily_usage: Array<{ day: string; consumed: number }>
+    daily_rollover_wasted: Array<{ day: string; value: number }>
+    daily_rollover_used: Array<{ day: string; value: number }>
+  }
+  sections: {
+    top_consuming_accounts: Array<{
+      account_key: string
+      label: string
+      display_label: string | null
+      email: string | null
+      consumed: number
+    }>
+    stale_accounts: Array<{
+      account_key: string
+      label: string
+      display_label: string | null
+      email: string | null
+      last_success_at?: string | null
+      last_error?: string | null
+    }>
+    failed_accounts: Array<{
+      account_key: string
+      label: string
+      display_label: string | null
+      email: string | null
+      last_attempt_at?: string | null
+      last_error?: string | null
+    }>
+    recent_rollovers: Array<{
+      label: string
+      display_label: string | null
+      email: string | null
+      window_ended_at?: string | null
+      usage_used?: number
+      usage_limit?: number
+      usage_wasted?: number
+      rolled_over_at?: string | null
+    }>
+  }
+  freshness: {
+    coverage_start?: string | null
+    coverage_end?: string | null
+    snapshot_points: number
+    daily_points: number
+    is_sparse: boolean
   }
 }
 
@@ -271,7 +360,12 @@ function App() {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState<string | null>(null)
   const [historyData, setHistoryData] = useState<AccountHistoryResponse | null>(null)
-  const [fullStats, setFullStats] = useState<{ totals: any, daily_rollover_trend: any[] } | null>(null)
+  const [usageHistory, setUsageHistory] = useState<UsageHistoryResponse | null>(null)
+  const [selectedRange, setSelectedRange] = useState<RangeKey>('30d')
+  const [statsChartMode, setStatsChartMode] = useState<'cumulative' | 'daily'>('cumulative')
+  const [accountChartMode, setAccountChartMode] = useState<'cumulative' | 'daily'>('cumulative')
+  const [accountHistoryRange, setAccountHistoryRange] = useState<RangeKey>('30d')
+  const [activeHistoryLabel, setActiveHistoryLabel] = useState<string | null>(null)
   const streamRef = useRef<EventSource | null>(null)
   const currentLabelRef = useRef<string | null>(currentLabel)
   const hasActionApiKey = actionApiKey.trim().length > 0
@@ -303,6 +397,11 @@ function App() {
     if (!best) return a
     return getScore(a) < getScore(best) ? a : best
   }, null)
+
+  const statsDaily = usageHistory?.series.daily_usage || []
+  const statsCumulative = usageHistory?.series.cumulative_usage || []
+  const statsPrimarySeries = statsChartMode === 'daily' ? statsDaily : statsCumulative
+  const statsMaxValue = Math.max(1, ...statsPrimarySeries.map((d: any) => Number((d as any).consumed ?? (d as any).cumulative ?? 0)))
 
   const graphPath = useMemo(() => {
     if (!history.length) return ''
@@ -345,41 +444,38 @@ function App() {
     setAccounts(payload.accounts.map((a) => normalizeAccount(a, payload.current_label)))
     setAggregate(payload.aggregate)
     
-    // Load the cluster-wide time-series snapshots
+    // Keep manager sparkline responsive with short-range daily usage.
     try {
       setHistoryLoading(true)
-      const snapData = await requestJson<{ trend: Array<{ t: string; avg_primary_pct: number; avg_secondary_pct: number }> }>('/api/usage/snapshots', token)
-      if (snapData.trend?.length) {
-        const cutoff = Date.now() - (24 * 60 * 60 * 1000)
-        const last24h = snapData.trend
-          .map((d) => {
-            const primary = Number.isFinite(d.avg_primary_pct) ? d.avg_primary_pct : 0
-            const secondary = Number.isFinite(d.avg_secondary_pct) ? d.avg_secondary_pct : 0
-            const value = Math.round((primary + secondary) / 2)
-            return { t: new Date(d.t).getTime(), value }
-          })
+      const historyPayload = await requestJson<UsageHistoryResponse>(`/api/usage/history?range=7d`, token)
+      setUsageHistory(historyPayload)
+      if (historyPayload.series?.daily_usage?.length) {
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000
+        const last24h = historyPayload.series.daily_usage
+          .map((d) => ({ t: new Date(`${d.day}T00:00:00Z`).getTime(), value: Number(d.consumed || 0) }))
           .filter((d) => Number.isFinite(d.t) && d.t >= cutoff)
         if (last24h.length) {
           setHistory(last24h)
         } else {
-          const fallback = payload.aggregate.aggregate_utilization_percent || averagePrimaryPercent(payload.accounts)
+          const fallback = historyPayload.summary.total_consumed_in_range || payload.aggregate.total_current_window_used || 0
           setHistory([{ t: Date.now(), value: fallback }])
         }
       } else {
-        const fallback = payload.aggregate.aggregate_utilization_percent || averagePrimaryPercent(payload.accounts)
+        const fallback = payload.aggregate.total_current_window_used || 0
         setHistory([{ t: Date.now(), value: fallback }])
       }
-      
-      // Also fetch legacy stats for the totals cards
-      const stats = await requestJson<{ totals: any, daily_rollover_trend: any[] }>('/api/usage/stats', token)
-      setFullStats(stats)
     } catch {
-      const fallback = payload.aggregate.aggregate_utilization_percent || averagePrimaryPercent(payload.accounts)
+      const fallback = payload.aggregate.total_current_window_used || 0
       setHistory([{ t: Date.now(), value: fallback }])
     } finally {
       setHistoryLoading(false)
     }
     setStatus('Loaded cached snapshot')
+  }
+
+  const loadUsageHistory = async (token: string, range: RangeKey) => {
+    const data = await requestJson<UsageHistoryResponse>(`/api/usage/history?range=${range}`, token)
+    setUsageHistory(data)
   }
 
   const startStream = (token: string) => {
@@ -434,6 +530,7 @@ function App() {
       const data = JSON.parse((ev as MessageEvent).data) as Aggregate
       setAggregate(data)
       setHistory((prev) => [...prev, { t: Date.now(), value: data.aggregate_utilization_percent || displayUtilization }].slice(-50))
+      void loadUsageHistory(token, selectedRange).catch(() => {})
     })
 
     es.addEventListener('error', (ev) => {
@@ -607,28 +704,37 @@ function App() {
 
   const openAccountHistory = async (label: string) => {
     if (!apiKey.trim()) return
+    setActiveHistoryLabel(label)
+    setAccountHistoryRange('30d')
+    setAccountChartMode('cumulative')
     setHistoryModalOpen(true)
     setHistoryLoading(true)
     setHistoryError(null)
     setHistoryData(null)
     try {
-      // Fetch both the legacy usage-history and the new snapshots endpoint
-      const [histPayload, snapPayload] = await Promise.all([
-        requestJson<AccountHistoryResponse>(
-          `/api/accounts/${encodeURIComponent(label)}/usage-history`,
-          apiKey,
-        ),
-        requestJson<{ label: string; trend: Array<{ t: string; avg_primary_pct: number; avg_secondary_pct: number }>; rollovers: any[] }>(
-          `/api/accounts/${encodeURIComponent(label)}/snapshots`,
-          apiKey,
-        ).catch(() => null),
-      ])
-      // Merge snapshot trend into history data for rendering
-      setHistoryData({
-        ...histPayload,
-        _snapshot_trend: snapPayload?.trend || [],
-        rollovers: snapPayload?.rollovers || histPayload.rollovers || [],
-      } as any)
+      const histPayload = await requestJson<AccountHistoryResponse>(
+        `/api/accounts/${encodeURIComponent(label)}/history?range=30d`,
+        apiKey,
+      )
+      setHistoryData(histPayload)
+    } catch (e) {
+      setHistoryError(e instanceof Error ? e.message : 'Unable to load account history')
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  const reloadAccountHistory = async (range: RangeKey) => {
+    if (!apiKey.trim() || !activeHistoryLabel) return
+    setAccountHistoryRange(range)
+    setHistoryLoading(true)
+    setHistoryError(null)
+    try {
+      const histPayload = await requestJson<AccountHistoryResponse>(
+        `/api/accounts/${encodeURIComponent(activeHistoryLabel)}/history?range=${range}`,
+        apiKey,
+      )
+      setHistoryData(histPayload)
     } catch (e) {
       setHistoryError(e instanceof Error ? e.message : 'Unable to load account history')
     } finally {
@@ -661,10 +767,18 @@ function App() {
       return
     }
     void loadCached(apiKey)
-      .then(() => startStream(hasActionApiKey ? actionApiKey : apiKey))
+      .then(async () => {
+        await loadUsageHistory(apiKey, selectedRange)
+        startStream(hasActionApiKey ? actionApiKey : apiKey)
+      })
       .catch((e: unknown) => setErr(e instanceof Error ? e.message : 'Load failed'))
     return () => stopStream()
   }, [apiKey, actionApiKey, hasActionApiKey])
+
+  useEffect(() => {
+    if (!apiKey.trim()) return
+    void loadUsageHistory(apiKey, selectedRange).catch(() => {})
+  }, [selectedRange])
 
   if (!apiKey.trim()) {
     return (
@@ -846,77 +960,90 @@ function App() {
         <section className="aggregate panel">
           <div className="aggregate-header">
             <h2>Aggregated Usage Analytics</h2>
-            <p className="muted">Cluster-wide utilization and historical trend across managed accounts.</p>
+            <p className="muted">Consumption over time across all accounts (absolute usage).</p>
+          </div>
+          <div className="top-actions" style={{ marginBottom: 12 }}>
+            {(['7d', '30d', '90d', 'all'] as RangeKey[]).map((r) => (
+              <button key={r} className={`btn btn-sm ${selectedRange === r ? 'primary' : ''}`} onClick={() => setSelectedRange(r)}>
+                {r}
+              </button>
+            ))}
+            <button className={`btn btn-sm ${statsChartMode === 'cumulative' ? 'primary' : ''}`} onClick={() => setStatsChartMode('cumulative')}>Cumulative</button>
+            <button className={`btn btn-sm ${statsChartMode === 'daily' ? 'primary' : ''}`} onClick={() => setStatsChartMode('daily')}>Daily</button>
           </div>
           <div className="cards">
-            <div><label>Total Used</label><strong>{fullStats?.totals ? fullStats.totals.active_window_used : (aggregate.total_current_window_limit > 0 ? aggregate.total_current_window_used : '--')}</strong></div>
-            <div><label>Total Limit</label><strong>{fullStats?.totals ? fullStats.totals.active_window_limit : (aggregate.total_current_window_limit > 0 ? aggregate.total_current_window_limit : '--')}</strong></div>
-            <div><label>Combined Remaining</label><strong>{fullStats?.totals ? (fullStats.totals.active_window_limit - fullStats.totals.active_window_used) : (aggregate.total_current_window_limit > 0 ? aggregate.total_remaining : '--')}</strong></div>
-            <div className="accent-card"><label>Global Utilization</label><strong style={{ color: '#10b981' }}>{displayUtilization}%</strong></div>
-            <div><label>Lifetime Tokens</label><strong>{fullStats?.totals?.lifetime_used ?? aggregate.lifetime_total_used}</strong></div>
-            <div className={ (fullStats?.totals?.total_wasted || aggregate.total_wasted) > 1000 ? 'warn-card' : '' }><label>Total Wasted</label><strong>{fullStats?.totals?.total_wasted ?? aggregate.total_wasted}</strong></div>
-            <div><label>Managed Accounts</label><strong>{accountCount}</strong></div>
-            <div><label>Stale / Failed</label><strong>{aggregate.stale_accounts} / {aggregate.failed_accounts}</strong></div>
-            <div><label>Last Full Refresh</label><strong>{fmtTs(aggregate.last_refresh_time)}</strong></div>
+            <div><label>Total Consumed ({selectedRange})</label><strong>{usageHistory?.summary.total_consumed_in_range ?? 0}</strong></div>
+            <div><label>Avg Daily Consumption</label><strong>{usageHistory?.summary.average_daily_consumption ?? 0}</strong></div>
+            <div><label>Current Total Used</label><strong>{usageHistory?.summary.current_total_used ?? aggregate.total_current_window_used}</strong></div>
+            <div><label>Current Total Limit</label><strong>{usageHistory?.summary.current_total_limit ?? aggregate.total_current_window_limit}</strong></div>
+            <div><label>Current Remaining</label><strong>{usageHistory?.summary.current_total_remaining ?? aggregate.total_remaining}</strong></div>
+            <div className={(usageHistory?.summary.total_wasted || 0) > 1000 ? 'warn-card' : ''}><label>Total Wasted</label><strong>{usageHistory?.summary.total_wasted ?? 0}</strong></div>
+            <div><label>Stale Accounts</label><strong>{usageHistory?.summary.stale_account_count ?? 0}</strong></div>
+            <div><label>Failed Accounts</label><strong>{usageHistory?.summary.failed_account_count ?? 0}</strong></div>
+            <div><label>Last Refresh</label><strong>{fmtTs(usageHistory?.summary.last_refresh_time ?? aggregate.last_refresh_time)}</strong></div>
           </div>
-          {aggregate.total_current_window_limit === 0 && !fullStats?.totals?.active_window_limit ? (
-            <div className="muted" style={{ marginTop: 12, padding: '0 4px' }}>
-              ℹ️ Absolute token counts are derived from historical window captures when available. Current utilization is mapped from realtime percentages.
-            </div>
-          ) : null}
           <div className="graph-container">
-            <div className="graph-label">Utilization Trend (24h)</div>
+            <div className="graph-label">
+              {statsChartMode === 'cumulative' ? 'Cumulative Usage Over Time' : 'Daily Usage'}
+            </div>
             <div className="graph">
-              <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-                <defs>
-                  <linearGradient id="usageGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#10b981" stopOpacity="0.25" />
-                    <stop offset="100%" stopColor="#10b981" stopOpacity="0" />
-                  </linearGradient>
-                </defs>
-                {history.length > 0 && <path d={graphPath} fill="url(#usageGradient)" />}
-                {history.length > 0 && <path d={graphLine} fill="none" stroke="#10b981" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />}
-              </svg>
-              <div className="graph-meta">
-                <span>Cluster Efficiency</span>
-                <span>Moving Average</span>
-              </div>
+              {statsPrimarySeries.length ? (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {statsPrimarySeries.slice(-30).map((point: any) => {
+                    const value = Number(point.cumulative ?? point.consumed ?? 0)
+                    const pct = Math.max(2, Math.round((value / statsMaxValue) * 100))
+                    return (
+                      <div key={`${point.day}-${value}`} style={{ display: 'grid', gridTemplateColumns: '84px 1fr 88px', gap: 8, alignItems: 'center' }}>
+                        <span className="muted mono">{point.day}</span>
+                        <div className="bar"><span className="fill ok" style={{ width: `${pct}%` }} /></div>
+                        <span className="mono">{value}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : <div className="muted">No usage history yet for this range.</div>}
             </div>
           </div>
-          
-          {fullStats?.daily_rollover_trend && fullStats.daily_rollover_trend.length > 1 && (
-             <div className="graph-container" style={{ marginTop: 32 }}>
-               <div className="graph-label">Wasted Tokens History</div>
-               <div className="graph grayscale">
-                 <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-                    <path d={(() => {
-                        const trend = fullStats.daily_rollover_trend;
-                        const maxWasted = Math.max(1, ...trend.map(t => t.sum_wasted));
-                        const points = trend.map((t, i) => {
-                          const x = (i / (trend.length - 1)) * 100;
-                          const y = 100 - (t.sum_wasted / maxWasted) * 100;
-                          return `${x},${y}`;
-                        });
-                        return `M ${points[0]} L ${points.join(' L ')} L 100,100 L 0,100 Z`;
-                    })()} fill="rgba(245, 158, 11, 0.1)" />
-                    <path d={(() => {
-                        const trend = fullStats.daily_rollover_trend;
-                        const maxWasted = Math.max(1, ...trend.map(t => t.sum_wasted));
-                        const points = trend.map((t, i) => {
-                          const x = (i / (trend.length - 1)) * 100;
-                          const y = 100 - (t.sum_wasted / maxWasted) * 100;
-                          return `${x},${y}`;
-                        });
-                        return `M ${points.join(' L ')}`;
-                    })()} fill="none" stroke="#f59e0b" strokeWidth="1" strokeDasharray="3 2" />
-                 </svg>
-                 <div className="graph-meta">
-                    <span>Quota Exhaustion Leak</span>
-                    <span>Historical Loss</span>
-                 </div>
-               </div>
-             </div>
-          )}
+          <div className="graph-container">
+            <div className="graph-label">Wasted At Rollover (Daily)</div>
+            <div className="graph">
+              {(usageHistory?.series.daily_rollover_wasted || []).length ? (
+                <div style={{ display: 'grid', gap: 6 }}>
+                  {(usageHistory?.series.daily_rollover_wasted || []).slice(-30).map((point) => (
+                    <div key={`w-${point.day}`} style={{ display: 'grid', gridTemplateColumns: '84px 1fr 88px', gap: 8, alignItems: 'center' }}>
+                      <span className="muted mono">{point.day}</span>
+                      <div className="bar"><span className="fill warn" style={{ width: `${Math.max(2, Math.min(100, point.value))}%` }} /></div>
+                      <span className="mono">{point.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="muted">No rollover wastage history yet.</div>}
+            </div>
+          </div>
+
+          <div className="cards" style={{ marginTop: 16 }}>
+            <div>
+              <label>Top Consuming Accounts</label>
+              {(usageHistory?.sections.top_consuming_accounts || []).slice(0, 5).map((item) => (
+                <div key={item.account_key} className="muted" style={{ marginTop: 4 }}>
+                  {(item.display_label || item.label)}: <span className="mono">{item.consumed}</span>
+                </div>
+              ))}
+            </div>
+            <div>
+              <label>Stale / Failed Accounts</label>
+              <div className="muted">Stale: {(usageHistory?.sections.stale_accounts || []).length}</div>
+              <div className="muted">Failed: {(usageHistory?.sections.failed_accounts || []).length}</div>
+            </div>
+            <div>
+              <label>Recent Rollover Events</label>
+              {(usageHistory?.sections.recent_rollovers || []).slice(0, 5).map((item, idx) => (
+                <div key={`r-${idx}`} className="muted" style={{ marginTop: 4 }}>
+                  {(item.display_label || item.label)} · {fmtTs(item.window_ended_at || item.rolled_over_at)}
+                </div>
+              ))}
+            </div>
+          </div>
         </section>
       )}
 
@@ -932,81 +1059,78 @@ function App() {
             {historyData ? (
               <div>
                 <div className="muted"><strong>{historyData.display_label || historyData.label}</strong> · {historyData.email || 'email unavailable'}</div>
-                
-                {/* Chart: Utilization % over time */}
-                {(historyData as any)?._snapshot_trend?.length > 1 && (
-                  <div className="graph-container" style={{ marginTop: 16 }}>
-                    <div className="graph-label">Usage % Over Time (7d)</div>
-                    <div className="graph">
-                      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
-                        <defs>
-                          <linearGradient id="acctGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#6366f1" stopOpacity="0.25" />
-                            <stop offset="100%" stopColor="#6366f1" stopOpacity="0" />
-                          </linearGradient>
-                        </defs>
-                        {(() => {
-                          const trend = (historyData as any)._snapshot_trend as Array<{ t: string; avg_primary_pct: number; avg_secondary_pct: number }>
-                          const maxVal = Math.max(100, ...trend.map(d => Math.max(d.avg_primary_pct, d.avg_secondary_pct)))
-                          const points = trend.map((d, i) => {
-                            const x = (i / (trend.length - 1)) * 100
-                            const y = 100 - (Math.max(d.avg_primary_pct, d.avg_secondary_pct) / maxVal) * 100
-                            return `${x},${y}`
-                          })
-                          const linePath = `M ${points.join(' L ')}`
-                          const fillPath = `${linePath} L 100,100 L 0,100 Z`
-                          return (
-                            <>
-                              <path d={fillPath} fill="url(#acctGradient)" />
-                              <path d={linePath} fill="none" stroke="#6366f1" strokeWidth="1.5" />
-                            </>
-                          )
-                        })()}
-                      </svg>
-                      <div className="graph-meta">
-                        <span>5hr / 7d Usage %</span>
-                        <span>Hourly Average</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
 
-                {/* Summary cards */}
+                <div className="top-actions" style={{ marginTop: 10 }}>
+                  {(['7d', '30d', '90d', 'all'] as RangeKey[]).map((r) => (
+                    <button key={r} className={`btn btn-sm ${accountHistoryRange === r ? 'primary' : ''}`} onClick={() => void reloadAccountHistory(r)}>
+                      {r}
+                    </button>
+                  ))}
+                  <button className={`btn btn-sm ${accountChartMode === 'cumulative' ? 'primary' : ''}`} onClick={() => setAccountChartMode('cumulative')}>Cumulative</button>
+                  <button className={`btn btn-sm ${accountChartMode === 'daily' ? 'primary' : ''}`} onClick={() => setAccountChartMode('daily')}>Daily</button>
+                </div>
+
                 <div className="cards" style={{ marginTop: 12 }}>
-                  <div><label>Completed Windows</label><strong>{historyData.summary?.window_count ?? 0}</strong></div>
-                  <div><label>Avg Utilization</label><strong>{historyData.summary?.avg_completed_utilization_percent ?? '--'}%</strong></div>
-                  <div>
-                    <label>% Wasted Last Reset</label>
-                    <strong className="text-warn">
-                      {historyData.rollovers?.length
-                        ? (() => {
-                            const last = historyData.rollovers[historyData.rollovers.length - 1] as any
-                            const pct = last?.secondary_percent_at_reset
-                            return pct != null ? `${Math.round(100 - pct)}%` : '--'
-                          })()
-                        : '--'}
-                    </strong>
+                  <div><label>Current Used</label><strong>{historyData.current_state.usage_in_window}</strong></div>
+                  <div><label>Current Limit</label><strong>{historyData.current_state.usage_limit}</strong></div>
+                  <div><label>Remaining</label><strong>{historyData.current_state.remaining}</strong></div>
+                  <div><label>Next Reset</label><strong>{fmtTs(historyData.current_state.next_reset || null)}</strong></div>
+                  <div><label>Lifetime Used</label><strong>{historyData.current_state.lifetime_used}</strong></div>
+                  <div><label>Last Sync</label><strong>{fmtTs(historyData.current_state.last_sync || null)}</strong></div>
+                  <div><label>Range Consumed</label><strong>{historyData.consumption_trend.total_consumed_in_range}</strong></div>
+                  <div><label>Avg Daily</label><strong>{historyData.consumption_trend.average_daily_consumption}</strong></div>
+                  <div><label>Data Coverage</label><strong>{historyData.freshness.coverage_start || '--'} → {historyData.freshness.coverage_end || '--'}</strong></div>
+                </div>
+
+                <div className="graph-container" style={{ marginTop: 16 }}>
+                  <div className="graph-label">{accountChartMode === 'cumulative' ? 'Cumulative Consumption' : 'Daily Consumption'}</div>
+                  <div className="graph">
+                    {(() => {
+                      const points = accountChartMode === 'cumulative'
+                        ? historyData.consumption_trend.cumulative_usage
+                        : historyData.consumption_trend.daily_usage
+                      if (!points.length) return <div className="muted">No history yet for this range.</div>
+                      const maxVal = Math.max(1, ...points.map((p: any) => Number((p as any).cumulative ?? (p as any).consumed ?? 0)))
+                      return (
+                        <div style={{ display: 'grid', gap: 6 }}>
+                          {points.slice(-30).map((p: any) => {
+                            const value = Number((p as any).cumulative ?? (p as any).consumed ?? 0)
+                            const pct = Math.max(2, Math.round((value / maxVal) * 100))
+                            return (
+                              <div key={`${p.day}-${value}`} style={{ display: 'grid', gridTemplateColumns: '84px 1fr 88px', gap: 8, alignItems: 'center' }}>
+                                <span className="muted mono">{p.day}</span>
+                                <div className="bar"><span className="fill ok" style={{ width: `${pct}%` }} /></div>
+                                <span className="mono">{value}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )
+                    })()}
                   </div>
                 </div>
 
-                {/* Rollover table with percentage data */}
                 <div className="history-table">
-                  <div className="history-head">
-                    <span>End Date</span>
-                    <span>5hr %</span>
-                    <span>7d %</span>
-                    <span>Wasted %</span>
+                  <div className="history-head history-head-7">
+                    <span>Window Start</span>
+                    <span>Window End</span>
+                    <span>Used</span>
+                    <span>Limit</span>
+                    <span>Wasted</span>
+                    <span>Utilization</span>
+                    <span>Rolled Over</span>
                   </div>
-                  {historyData.rollovers?.length ? historyData.rollovers.slice(-10).reverse().map((r: any, idx: number) => (
-                    <div key={idx} className="history-row">
-                      <span>{fmtTs(r.window_ended_at || '')}</span>
-                      <span className="mono">{r.primary_percent_at_reset != null ? `${r.primary_percent_at_reset}%` : '--'}</span>
-                      <span className="mono">{r.secondary_percent_at_reset != null ? `${r.secondary_percent_at_reset}%` : '--'}</span>
-                      <span className={r.secondary_percent_at_reset != null && (100 - r.secondary_percent_at_reset) > 30 ? 'text-warn' : ''}>
-                        {r.secondary_percent_at_reset != null ? `${Math.round(100 - r.secondary_percent_at_reset)}%` : '--'}
-                      </span>
+                  {historyData.completed_windows?.length ? historyData.completed_windows.slice(0, 30).map((r, idx) => (
+                    <div key={idx} className="history-row history-row-7">
+                      <span>{fmtTs(r.window_start || '')}</span>
+                      <span>{fmtTs(r.window_end || '')}</span>
+                      <span className="mono">{r.used}</span>
+                      <span className="mono">{r.limit}</span>
+                      <span className="mono">{r.wasted}</span>
+                      <span className="mono">{r.utilization_percent == null ? '--' : `${r.utilization_percent}%`}</span>
+                      <span>{fmtTs(r.rolled_over_at || '')}</span>
                     </div>
-                  )) : <div className="muted" style={{ padding: 12 }}>No rollover history yet.</div>}
+                  )) : <div className="muted" style={{ padding: 12 }}>No completed windows yet.</div>}
                 </div>
               </div>
             ) : null}
