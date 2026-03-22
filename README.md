@@ -126,6 +126,5 @@ Services:
 
 ## Notes
 
-- Saved profile JSON files are no longer canonical storage.
 - DB is source of truth; active auth file is materialized for runtime integration.
 - Cached-first UI means page loads from persisted state first, then refreshes live.
