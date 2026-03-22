@@ -7,6 +7,34 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_manager}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-auth_manager} -d ${POSTGRES_DB:-auth_manager}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  auth-manager:
+    image: ghcr.io/halsysfin/codex-auth-manager:latest
+    ports:
+      - "8080:8080"
+    environment:
+      CODEX_CLI_BIN: ${CODEX_CLI_BIN:-codex}
+      CODEX_AUTH_PATH: ${CODEX_AUTH_PATH:-/root/.codex/auth.json}
+      CALLBACK_STORE_DIR: ${CALLBACK_STORE_DIR:-/root/.codex-switch/callbacks}
+      CODEX_PROFILES_DIR: ${CODEX_PROFILES_DIR:-/root/.codex-switch/profiles}
+      USAGE_DB_PATH: ${USAGE_DB_PATH:-/root/.codex-switch/auth-manager.sqlite3}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://auth_manager:auth_manager@postgres:5432/auth_manager}
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY:-}
+      WEB_LOGIN_USERNAME: ${WEB_LOGIN_USERNAME:-}
+      WEB_LOGIN_PASSWORD: ${WEB_LOGIN_PASSWORD:-}
+      WEB_LOGIN_SESSION_SECRET: ${WEB_LOGIN_SESSION_SECRET:-}
+    volumes:
+      - codex_auth:/root/.codex
+      - codex_switch:/root/.codex-switch
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   auth-manager:
