@@ -1,4 +1,14 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-auth_manager}
+      POSTGRES_USER: ${POSTGRES_USER:-auth_manager}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-auth_manager}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   auth-manager:
     build:
       context: .
@@ -12,6 +22,8 @@ services:
       CALLBACK_STORE_DIR: ${CALLBACK_STORE_DIR:-/root/.codex-switch/callbacks}
       CODEX_PROFILES_DIR: ${CODEX_PROFILES_DIR:-/root/.codex-switch/profiles}
       USAGE_DB_PATH: ${USAGE_DB_PATH:-/root/.codex-switch/auth-manager.sqlite3}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://auth_manager:auth_manager@postgres:5432/auth_manager}
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY:-}
       LOGIN_SESSION_TTL_SECONDS: ${LOGIN_SESSION_TTL_SECONDS:-600}
       WEB_LOGIN_USERNAME: ${WEB_LOGIN_USERNAME:-}
       WEB_LOGIN_PASSWORD: ${WEB_LOGIN_PASSWORD:-}
@@ -21,7 +33,6 @@ services:
       TRUSTED_PROXY_IPS: ${TRUSTED_PROXY_IPS:-}
       INTERNAL_NETWORK_CIDRS: ${INTERNAL_NETWORK_CIDRS:-127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7}
       INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-}
-      RATE_LIMIT_PROBE_URL: ${RATE_LIMIT_PROBE_URL:-https://api.openai.com/v1/models}
       OPENAI_ORGANIZATION: ${OPENAI_ORGANIZATION:-}
       OPENAI_PROJECT: ${OPENAI_PROJECT:-}
       OPENAI_TOKEN_URL: ${OPENAI_TOKEN_URL:-}
@@ -31,6 +42,8 @@ services:
     volumes:
       - codex_auth:/root/.codex
       - codex_switch:/root/.codex-switch
+    depends_on:
+      - postgres
     restart: unless-stopped
   frontend:
     image: node:20-alpine
@@ -47,5 +60,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  postgres_data:
   codex_auth:
   codex_switch:

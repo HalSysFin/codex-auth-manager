@@ -31,19 +31,26 @@ from .account_identity import (
 from .account_usage_store import (
     delete_account_data,
     ensure_account,
+    delete_saved_profile,
+    get_saved_profile,
     get_account,
+    get_active_profile_label,
     initialize_usage_store,
     list_absolute_usage_snapshots,
     list_usage_rollovers,
     list_usage_snapshots,
+    migrate_legacy_local_state,
     merge_account_data,
     migrate_account_ids,
+    rename_saved_profile,
     rename_account_data,
     record_account_usage,
     record_percentage_snapshot,
     reconcile_due_accounts,
+    set_active_profile_label,
     sync_account_rate_limit_percentages,
     sync_account_usage_snapshot,
+    upsert_saved_profile,
 )
 from .auth_store import (
     AuthStoreError,
@@ -112,6 +119,15 @@ class PersistCurrentAuthResult:
 @app.on_event("startup")
 async def on_startup() -> None:
     initialize_usage_store()
+    try:
+        migration_result = migrate_legacy_local_state(
+            sqlite_usage_path=settings.usage_db_file(),
+            profiles_dir=settings.profiles_dir(),
+        )
+        if any(v > 0 for v in migration_result.values()):
+            logger.info("legacy local state migrated to primary DB: %s", migration_result)
+    except Exception as exc:
+        logger.warning("legacy migration skipped/failed: %s", exc)
     _migrate_usage_keys_from_labels()
     global _reconcile_task
     if _reconcile_task is None:
@@ -698,16 +714,18 @@ async def auth_delete(request: Request, payload: dict[str, Any]) -> JSONResponse
     if not label:
         raise HTTPException(status_code=400, detail="label is required")
 
-    profile_path = settings.profiles_dir() / f"{label}.json"
-    if not profile_path.exists():
-        raise HTTPException(status_code=404, detail="Label not found")
-
     profile = _profile_for_label(label)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Label not found")
     usage_key = profile.account_key if profile else label
 
     try:
-        profile_path.unlink()
+        deleted = delete_saved_profile(label)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Label not found")
         delete_account_data(usage_key)
+        if (get_active_profile_label() or "").strip() == label:
+            set_active_profile_label(None)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"Unable to delete profile: {exc}") from exc
 
@@ -729,20 +747,14 @@ async def auth_rename(request: Request, payload: dict[str, Any]) -> JSONResponse
             detail="new_label must be 1-64 chars and contain only letters, numbers, dot, underscore, or dash",
         )
 
-    profiles_dir = settings.profiles_dir()
-    source = profiles_dir / f"{old_label}.json"
-    target = profiles_dir / f"{new_label}.json"
-    if not source.exists():
+    source_profile = get_saved_profile(old_label)
+    if source_profile is None:
         raise HTTPException(status_code=404, detail="old_label not found")
     merged_duplicate = False
-    if target.exists():
-        try:
-            source_auth = json.loads(source.read_text())
-            target_auth = json.loads(target.read_text())
-        except (OSError, ValueError):
-            source_auth = None
-            target_auth = None
-
+    target_profile = get_saved_profile(new_label)
+    if target_profile is not None:
+        source_auth = source_profile.get("auth_json")
+        target_auth = target_profile.get("auth_json")
         source_email = extract_email(source_auth) if isinstance(source_auth, dict) else None
         target_email = extract_email(target_auth) if isinstance(target_auth, dict) else None
         source_token = extract_access_token(source_auth)
@@ -754,18 +766,18 @@ async def auth_rename(request: Request, payload: dict[str, Any]) -> JSONResponse
             same_identity = True
         if not same_identity:
             raise HTTPException(status_code=409, detail="new_label already exists")
-        try:
-            target.unlink()
-            merged_duplicate = True
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=f"Unable to replace duplicate profile: {exc}") from exc
+        with suppress(Exception):
+            delete_saved_profile(new_label)
         with suppress(Exception):
             delete_account_data(new_label)
+        merged_duplicate = True
 
     try:
-        source.rename(target)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"Unable to rename profile: {exc}") from exc
+        renamed = rename_saved_profile(old_label, new_label)
+        if not renamed:
+            raise HTTPException(status_code=404, detail="old_label not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     with suppress(Exception):
         rename_account_data(old_label, new_label)
@@ -777,15 +789,12 @@ async def auth_rename(request: Request, payload: dict[str, Any]) -> JSONResponse
     now_current = None
     was_current = False
     try:
-        was_current = current_label() == old_label
+        was_current = (get_active_profile_label() or current_label()) == old_label
     except CodexSwitchError:
         was_current = False
     if was_current:
-        try:
-            switch_label(new_label)
-            now_current = new_label
-        except CodexSwitchError:
-            now_current = None
+        set_active_profile_label(new_label)
+        now_current = new_label
 
     return JSONResponse(
         {
@@ -1056,12 +1065,12 @@ async def api_account_usage_history(request: Request, label: str) -> JSONRespons
     if profile is None:
         raise HTTPException(status_code=404, detail="Label not found")
 
-    # Try to refresh usage snapshot from live rate-limit probe for this profile.
-    if profile.access_token:
-        async with httpx.AsyncClient(timeout=10) as client:
-            rate_info = await _fetch_rate_limits(client, profile.access_token)
-        if isinstance(rate_info, dict):
-            _sync_profile_usage_from_probe(profile, rate_info)
+    # Refresh usage snapshot using the same app-server session limits path as stream refresh.
+    baseline_auth = _safe_read_current_auth()
+    session_limits_by_label = _fetch_session_limits_for_profiles([profile], baseline_auth)
+    rate_info = session_limits_by_label.get(profile.label)
+    if isinstance(rate_info, dict) and not isinstance(rate_info.get("error"), str):
+        _sync_profile_usage_from_session_limits(profile, rate_info)
 
     _touch_account_usage(profile=profile)
     usage = _usage_tracking_payload(profile.account_key)
@@ -1187,8 +1196,9 @@ async def api_usage_history(request: Request, range: str = "30d") -> JSONRespons
     for profile in profiles:
         rollovers_all.extend(list_usage_rollovers(profile.account_key))
     rollovers_filtered = _filter_rollovers_by_range(rollovers_all, since_dt)
-    wasted_bars = _group_rollover_metric_by_day(rollovers_filtered, metric="usage_wasted")
-    daily_used_bars = _group_rollover_metric_by_day(rollovers_filtered, metric="usage_used")
+    weekly_rollovers = [row for row in rollovers_filtered if _is_weekly_rollover(row)]
+    wasted_bars = _group_rollover_metric_by_day(weekly_rollovers, metric="usage_wasted")
+    daily_used_bars = _group_rollover_metric_by_day(weekly_rollovers, metric="usage_used")
 
     consumed_by_account = {
         account_key: sum(day_map.values()) for account_key, day_map in per_account_daily.items()
@@ -1223,7 +1233,7 @@ async def api_usage_history(request: Request, range: str = "30d") -> JSONRespons
             )
 
     recent_rollovers = sorted(
-        rollovers_filtered,
+        weekly_rollovers,
         key=lambda row: str(row.get("rolled_over_at") or row.get("window_ended_at") or ""),
         reverse=True,
     )[:20]
@@ -1236,7 +1246,7 @@ async def api_usage_history(request: Request, range: str = "30d") -> JSONRespons
     consumed_total = sum(int(item["consumed"]) for item in daily_series)
     selected_days = _selected_day_count(selected_range, daily_series)
     avg_daily = round(consumed_total / selected_days, 2) if selected_days > 0 else 0.0
-    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in rollovers_filtered)
+    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in weekly_rollovers)
 
     return JSONResponse(
         {
@@ -1296,6 +1306,7 @@ async def api_account_history(request: Request, label: str, range: str = "30d") 
     usage = _usage_tracking_payload(profile.account_key) or {}
     rollovers_all = list_usage_rollovers(profile.account_key)
     rollovers_filtered = _filter_rollovers_by_range(rollovers_all, since_dt)
+    weekly_rollovers = [row for row in rollovers_filtered if _is_weekly_rollover(row)]
     snapshots = list_absolute_usage_snapshots(account_id=profile.account_key)
     per_account_daily = _compute_daily_consumption_per_account(
         snapshots=snapshots,
@@ -1317,12 +1328,12 @@ async def api_account_history(request: Request, label: str, range: str = "30d") 
     current_limit = int(usage.get("usage_limit") or 0)
     remaining = max(current_limit - current_used, 0)
     utilization = round((current_used / current_limit) * 100, 2) if current_limit > 0 else None
-    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in rollovers_filtered)
+    wasted_total = sum(int(item.get("usage_wasted") or 0) for item in weekly_rollovers)
     selected_days = _selected_day_count(selected_range, daily_series)
     avg_daily = round((sum(int(item["consumed"]) for item in daily_series) / selected_days), 2) if selected_days > 0 else 0.0
 
     completed_windows = sorted(
-        rollovers_filtered,
+        weekly_rollovers,
         key=lambda row: str(row.get("window_ended_at") or ""),
         reverse=True,
     )
@@ -1369,8 +1380,8 @@ async def api_account_history(request: Request, label: str, range: str = "30d") 
                 for row in completed_windows
             ],
             "wastage_series": {
-                "daily_wasted": _group_rollover_metric_by_day(rollovers_filtered, metric="usage_wasted"),
-                "daily_used": _group_rollover_metric_by_day(rollovers_filtered, metric="usage_used"),
+                "daily_wasted": _group_rollover_metric_by_day(weekly_rollovers, metric="usage_wasted"),
+                "daily_used": _group_rollover_metric_by_day(weekly_rollovers, metric="usage_used"),
                 "total_wasted": wasted_total,
             },
             "freshness": {
@@ -1970,48 +1981,6 @@ def _set_web_session_cookie(request: Request, response: Response) -> None:
     )
 
 
-async def _fetch_rate_limits(
-    client: httpx.AsyncClient, token: str
-) -> dict[str, Any]:
-    headers = {"Authorization": f"Bearer {token}"}
-    if settings.openai_organization:
-        headers["OpenAI-Organization"] = settings.openai_organization
-    if settings.openai_project:
-        headers["OpenAI-Project"] = settings.openai_project
-
-    try:
-        response = await client.get(settings.rate_limit_probe_url, headers=headers)
-    except httpx.RequestError as exc:
-        return {"error": str(exc)}
-
-    rate_headers = {
-        key.lower(): value
-        for key, value in response.headers.items()
-        if key.lower().startswith("x-ratelimit-")
-    }
-
-    requests_remaining = _parse_int(rate_headers.get("x-ratelimit-remaining-requests"))
-    requests_limit = _parse_int(rate_headers.get("x-ratelimit-limit-requests"))
-    tokens_remaining = _parse_int(rate_headers.get("x-ratelimit-remaining-tokens"))
-    tokens_limit = _parse_int(rate_headers.get("x-ratelimit-limit-tokens"))
-
-    return {
-        "status": response.status_code,
-        "requests": _format_limit(
-            requests_remaining,
-            requests_limit,
-            rate_headers.get("x-ratelimit-reset-requests"),
-        ),
-        "tokens": _format_limit(
-            tokens_remaining,
-            tokens_limit,
-            rate_headers.get("x-ratelimit-reset-tokens"),
-        ),
-        "raw_headers": rate_headers,
-        "error": response.text.strip() if response.status_code >= 400 else None,
-    }
-
-
 def _has_limit_data(rate_info: dict[str, Any]) -> bool:
     if not isinstance(rate_info, dict):
         return False
@@ -2067,31 +2036,6 @@ def _fetch_session_limits_for_profiles(
     return out
 
 
-def _format_limit(
-    remaining: int | None, limit: int | None, reset: str | None
-) -> dict[str, Any] | None:
-    if remaining is None and limit is None and reset is None:
-        return None
-    percent = None
-    if remaining is not None and limit:
-        percent = round((remaining / limit) * 100, 1)
-    return {
-        "remaining": remaining,
-        "limit": limit,
-        "percent": percent,
-        "reset": reset,
-    }
-
-
-def _parse_int(value: str | None) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
-
-
 def _touch_profiles_usage(profiles: list[AccountProfile]) -> None:
     now = datetime.now(timezone.utc)
     for profile in profiles:
@@ -2117,32 +2061,6 @@ def _touch_account_usage(
         record_account_usage(profile.account_key, 0, now=moment)
     except Exception:
         logger.exception("Unable to touch usage account for key=%s", profile.account_key)
-
-
-def _sync_profile_usage_from_probe(profile: AccountProfile, rate_info: dict[str, Any]) -> None:
-    requests_data = rate_info.get("requests")
-    if not isinstance(requests_data, dict):
-        return
-    limit = requests_data.get("limit")
-    remaining = requests_data.get("remaining")
-    reset = requests_data.get("reset")
-    if not isinstance(limit, int) or not isinstance(remaining, int):
-        return
-    used = max(limit - remaining, 0)
-    refresh_at = _parse_probe_reset_to_iso(reset)
-    try:
-        sync_account_usage_snapshot(
-            profile.account_key,
-            usage_limit=limit,
-            usage_used=used,
-            rate_limit_window_type="daily",
-            rate_limit_refresh_at=refresh_at,
-            provider_account_id=profile.provider_account_id,
-            name=profile.name or profile.email,
-            now=datetime.now(timezone.utc),
-        )
-    except Exception:
-        logger.exception("Unable to sync probe usage for key=%s", profile.account_key)
 
 
 def _sync_profile_usage_from_session_limits(profile: AccountProfile, rate_info: dict[str, Any]) -> None:
@@ -2207,31 +2125,13 @@ def _sync_profile_usage_from_session_limits(profile: AccountProfile, rate_info: 
         logger.exception("Unable to sync session usage for key=%s", profile.account_key)
 
 
-def _parse_probe_reset_to_iso(reset: Any) -> str | None:
-    if not isinstance(reset, str):
-        return None
-    raw = reset.strip()
-    if not raw:
-        return None
-    try:
-        # Common x-ratelimit reset format is relative durations (e.g. "15s", "1m").
-        suffix = raw[-1].lower()
-        value = int(raw[:-1])
-        multiplier = {"s": 1, "m": 60, "h": 3600}.get(suffix)
-        if multiplier is None:
-            return None
-        dt = datetime.now(timezone.utc).timestamp() + (value * multiplier)
-        return datetime.fromtimestamp(dt, tz=timezone.utc).isoformat()
-    except (ValueError, OverflowError):
-        return None
-
-
 def _extract_limit_snapshot(rate_limits: Any) -> dict[str, Any]:
     payload = rate_limits if isinstance(rate_limits, dict) else {}
 
     primary = payload.get("primary") if isinstance(payload.get("primary"), dict) else None
     secondary = payload.get("secondary") if isinstance(payload.get("secondary"), dict) else None
-    candidate = primary or secondary or payload
+    # Weekly window should drive rollover tracking/analytics when available.
+    candidate = secondary or primary or payload
 
     usage_limit = _find_int(candidate, {"limit", "max", "quota", "total"})
     usage_used = _find_int(candidate, {"used", "consumed"})
@@ -2663,6 +2563,28 @@ def _filter_rollovers_by_range(
         for row in rollovers
         if str(row.get("window_ended_at") or row.get("rolled_over_at") or "") >= since_iso
     ]
+
+
+def _is_weekly_rollover(row: dict[str, Any]) -> bool:
+    start_raw = str(row.get("window_started_at") or "")
+    end_raw = str(row.get("window_ended_at") or "")
+    if not start_raw or not end_raw:
+        return False
+    try:
+        start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        end_dt = datetime.fromisoformat(end_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    else:
+        start_dt = start_dt.astimezone(timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+    else:
+        end_dt = end_dt.astimezone(timezone.utc)
+    duration_hours = (end_dt - start_dt).total_seconds() / 3600
+    return duration_hours >= 24 * 6
 
 
 def _group_rollover_metric_by_day(

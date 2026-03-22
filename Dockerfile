@@ -32,6 +32,7 @@ ENV CODEX_CLI_BIN=codex \
     CALLBACK_STORE_DIR=/root/.codex-switch/callbacks \
     CODEX_PROFILES_DIR=/root/.codex-switch/profiles \
     USAGE_DB_PATH=/root/.codex-switch/auth-manager.sqlite3 \
+    DATABASE_URL=postgresql://auth_manager:auth_manager@postgres:5432/auth_manager \
     LOGIN_SESSION_TTL_SECONDS=600
 
 EXPOSE 8080

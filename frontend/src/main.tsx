@@ -402,6 +402,29 @@ function App() {
   const statsCumulative = usageHistory?.series.cumulative_usage || []
   const statsPrimarySeries = statsChartMode === 'daily' ? statsDaily : statsCumulative
   const statsMaxValue = Math.max(1, ...statsPrimarySeries.map((d: any) => Number((d as any).consumed ?? (d as any).cumulative ?? 0)))
+  const wastedSeries = usageHistory?.series.daily_rollover_wasted || []
+  const wastedMaxValue = Math.max(1, ...wastedSeries.map((d) => Number(d.value || 0)))
+  const weeklyPercents = accounts
+    .map((a) => limitPercent(a.rate_limits?.tokens || a.rate_limits?.secondary))
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+  const weeklyUtilizationNow = weeklyPercents.length
+    ? Math.round(weeklyPercents.reduce((sum, value) => sum + value, 0) / weeklyPercents.length)
+    : null
+  const weeklyAtCapCount = weeklyPercents.filter((v) => v >= 100).length
+
+  const buildLinePath = (values: number[], width = 1000, height = 220, pad = 24) => {
+    if (!values.length) return ''
+    const maxVal = Math.max(1, ...values)
+    const usableW = width - pad * 2
+    const usableH = height - pad * 2
+    return values
+      .map((v, i) => {
+        const x = pad + (i / Math.max(values.length - 1, 1)) * usableW
+        const y = height - pad - (v / maxVal) * usableH
+        return `${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
+      })
+      .join(' ')
+  }
 
   const graphPath = useMemo(() => {
     if (!history.length) return ''
@@ -984,39 +1007,69 @@ function App() {
           </div>
           <div className="graph-container">
             <div className="graph-label">
-              {statsChartMode === 'cumulative' ? 'Cumulative Usage Over Time' : 'Daily Usage'}
+              {statsChartMode === 'cumulative'
+                ? 'Cumulative Consumed Units Over Time'
+                : 'Daily Consumed Units'}
+            </div>
+            <div className="chart-legend">
+              <span className="legend-item">
+                <span className="legend-dot legend-dot-teal" />
+                Usage line = consumed units (from lifetime deltas), not utilization %
+              </span>
+              <span className="legend-item">
+                <span className="legend-dot legend-dot-amber" />
+                Weekly utilization now: {weeklyUtilizationNow == null ? '--' : `${weeklyUtilizationNow}%`}
+                {weeklyPercents.length ? ` (${weeklyAtCapCount}/${weeklyPercents.length} at 100%)` : ''}
+              </span>
             </div>
             <div className="graph">
               {statsPrimarySeries.length ? (
-                <div style={{ display: 'grid', gap: 6 }}>
-                  {statsPrimarySeries.slice(-30).map((point: any) => {
+                <svg viewBox="0 0 1000 220" preserveAspectRatio="none">
+                  <line x1="24" y1="196" x2="976" y2="196" stroke="#334155" strokeWidth="1" />
+                  <path
+                    d={buildLinePath(statsPrimarySeries.map((p: any) => Number(p.cumulative ?? p.consumed ?? 0)))}
+                    fill="none"
+                    stroke="#10b981"
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  {statsPrimarySeries.map((point: any, i: number) => {
                     const value = Number(point.cumulative ?? point.consumed ?? 0)
-                    const pct = Math.max(2, Math.round((value / statsMaxValue) * 100))
-                    return (
-                      <div key={`${point.day}-${value}`} style={{ display: 'grid', gridTemplateColumns: '84px 1fr 88px', gap: 8, alignItems: 'center' }}>
-                        <span className="muted mono">{point.day}</span>
-                        <div className="bar"><span className="fill ok" style={{ width: `${pct}%` }} /></div>
-                        <span className="mono">{value}</span>
-                      </div>
-                    )
+                    const x = 24 + (i / Math.max(statsPrimarySeries.length - 1, 1)) * (1000 - 48)
+                    const y = 196 - (value / statsMaxValue) * (220 - 48)
+                    return <circle key={`${point.day}-${value}-${i}`} cx={x} cy={y} r="3" fill="#10b981" />
                   })}
-                </div>
+                </svg>
               ) : <div className="muted">No usage history yet for this range.</div>}
             </div>
           </div>
           <div className="graph-container">
-            <div className="graph-label">Wasted At Rollover (Daily)</div>
+            <div className="graph-label">Wasted At Weekly Rollover (Over Time)</div>
             <div className="graph">
-              {(usageHistory?.series.daily_rollover_wasted || []).length ? (
-                <div style={{ display: 'grid', gap: 6 }}>
-                  {(usageHistory?.series.daily_rollover_wasted || []).slice(-30).map((point) => (
-                    <div key={`w-${point.day}`} style={{ display: 'grid', gridTemplateColumns: '84px 1fr 88px', gap: 8, alignItems: 'center' }}>
-                      <span className="muted mono">{point.day}</span>
-                      <div className="bar"><span className="fill warn" style={{ width: `${Math.max(2, Math.min(100, point.value))}%` }} /></div>
-                      <span className="mono">{point.value}</span>
-                    </div>
-                  ))}
-                </div>
+              {wastedSeries.length ? (
+                <svg viewBox="0 0 1000 220" preserveAspectRatio="none">
+                  <line x1="24" y1="196" x2="976" y2="196" stroke="#334155" strokeWidth="1" />
+                  {wastedSeries.map((point, i) => {
+                    const barW = (1000 - 48) / Math.max(wastedSeries.length, 1)
+                    const x = 24 + i * barW + 2
+                    const value = Number(point.value || 0)
+                    const h = ((220 - 48) * value) / wastedMaxValue
+                    const y = 196 - h
+                    return (
+                      <rect
+                        key={`w-${point.day}-${i}`}
+                        x={x}
+                        y={y}
+                        width={Math.max(2, barW - 4)}
+                        height={Math.max(1, h)}
+                        rx={2}
+                        fill="#f59e0b"
+                        opacity="0.9"
+                      />
+                    )
+                  })}
+                </svg>
               ) : <div className="muted">No rollover wastage history yet.</div>}
             </div>
           </div>

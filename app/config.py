@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     callback_store_dir: str = "/root/.codex-switch/callbacks"
     codex_profiles_dir: str = "/root/.codex-switch/profiles"
     usage_db_path: str = "/root/.codex-switch/auth-manager.sqlite3"
+    database_url: str | None = None
+    auth_encryption_key: str | None = None
     login_session_ttl_seconds: int = 600
     web_login_username: str | None = None
     web_login_password: str | None = None
@@ -32,7 +34,6 @@ class Settings(BaseSettings):
         "127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
     )
     internal_api_token: str | None = None
-    rate_limit_probe_url: str = "https://api.openai.com/v1/models"
     openai_organization: str | None = None
     openai_project: str | None = None
     openai_token_url: str | None = None

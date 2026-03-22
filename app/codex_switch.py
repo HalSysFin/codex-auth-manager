@@ -6,6 +6,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from .account_identity import extract_account_identity
+from .account_usage_store import (
+    get_active_profile_label,
+    get_saved_profile,
+    list_saved_profiles,
+    set_active_profile_label,
+    touch_profile_last_used,
+    upsert_saved_profile,
+)
 from .config import settings
 
 
@@ -94,6 +103,32 @@ def run_codex_switch(args: Sequence[str], *, check: bool = True) -> CodexSwitchR
 
 
 def save_label(label: str) -> CodexSwitchResult:
+    auth_path = settings.codex_auth_file()
+    if auth_path.exists():
+        try:
+            auth_json = json.loads(auth_path.read_text())
+        except Exception:
+            auth_json = None
+        if isinstance(auth_json, dict):
+            identity = extract_account_identity(auth_json)
+            upsert_saved_profile(
+                label=label,
+                account_key=identity.account_key or label,
+                auth_json=auth_json,
+                email=identity.email,
+                name=identity.name,
+                subject=identity.subject,
+                user_id=identity.user_id,
+                provider_account_id=identity.account_id,
+            )
+            set_active_profile_label(label)
+            touch_profile_last_used(label)
+            return CodexSwitchResult(
+                command=["internal-db-save", "--label", label],
+                returncode=0,
+                stdout=f"Saved profile '{label}' in DB",
+                stderr="",
+            )
     try:
         return run_codex_switch(["save", "--label", label], check=True)
     except CodexSwitchError as exc:
@@ -101,6 +136,19 @@ def save_label(label: str) -> CodexSwitchResult:
 
 
 def switch_label(label: str) -> CodexSwitchResult:
+    saved = get_saved_profile(label)
+    if saved is not None and isinstance(saved.get("auth_json"), dict):
+        auth_path = settings.codex_auth_file()
+        auth_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_path.write_text(json.dumps(saved["auth_json"], indent=2, sort_keys=True))
+        set_active_profile_label(label)
+        touch_profile_last_used(label)
+        return CodexSwitchResult(
+            command=["internal-db-switch", "--label", label],
+            returncode=0,
+            stdout=f"Switched to profile '{label}' via DB auth materialization",
+            stderr="",
+        )
     try:
         return run_codex_switch(["switch", "--label", label], check=True)
     except CodexSwitchError as exc:
@@ -108,6 +156,13 @@ def switch_label(label: str) -> CodexSwitchResult:
 
 
 def list_labels() -> list[str]:
+    try:
+        rows = list_saved_profiles()
+    except Exception:
+        rows = []
+    if rows:
+        return [str(row["label"]) for row in rows if str(row.get("label") or "").strip()]
+
     result = run_codex_switch(["list"], check=False)
     if result.returncode == 0 and result.stdout:
         labels: list[str] = []
@@ -125,6 +180,9 @@ def list_labels() -> list[str]:
 
 
 def current_label() -> str | None:
+    active = get_active_profile_label()
+    if active:
+        return active
     result = run_codex_switch(["current"], check=False)
     if result.returncode == 0 and result.stdout:
         first = result.stdout.splitlines()[0].strip()

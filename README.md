@@ -4,7 +4,7 @@ Central orchestration service for Codex auth profiles.
 
 Primary architecture:
 - Codex CLI performs login and writes `CODEX_AUTH_PATH` (default `/root/.codex/auth.json`)
-- `codex-switch` stores/switches labeled profiles in `CODEX_PROFILES_DIR`
+- Postgres stores saved profiles/auth payloads, usage state, rollovers, and snapshots
 - FastAPI backend owns auth/account persistence APIs
 - React + TypeScript + Vite frontend (`frontend/`) consumes backend APIs
 - Chrome extension relays localhost OAuth callbacks to auth-manager when login runs remotely
@@ -75,7 +75,7 @@ Current Codex CLI handoff note:
 Core:
 - `GET /health`
 - `GET /` and `GET /ui` frontend app shell (React build)
-- `GET /api/accounts` fast cached snapshot (profiles + SQLite usage; no blocking live probes)
+- `GET /api/accounts` fast cached snapshot (profiles + DB usage; no blocking live probes)
 - `GET /api/accounts/cached` same cached snapshot endpoint
 - `GET /api/accounts/stream` SSE live refresh stream (`snapshot`, `account_update`, `aggregate_update`, `complete`, `error`)
 - `GET /api/usage/aggregate` aggregated cached usage summary
@@ -112,11 +112,12 @@ This includes endpoints that expose raw auth JSON or mutate active auth state, i
 
 The React frontend stores the optional write/export API token in `localStorage` key `auth_manager_action_api_key`.
 
-For usage analytics, SQLite now stores:
+For usage analytics/history, the primary Postgres DB stores:
 - Current account state in `accounts`
 - Completed windows in `usage_rollovers`
 - Percentage snapshots in `usage_snapshots` (diagnostic)
 - Absolute snapshots in `usage_absolute_snapshots` (primary analytics source)
+- Saved auth profiles in `saved_profiles`
 
 ## Public Login Gate (Proxy + Internal Bypass)
 
@@ -148,6 +149,8 @@ CODEX_AUTH_PATH=/root/.codex/auth.json
 CALLBACK_STORE_DIR=/root/.codex-switch/callbacks
 CODEX_PROFILES_DIR=/root/.codex-switch/profiles
 USAGE_DB_PATH=/root/.codex-switch/auth-manager.sqlite3
+DATABASE_URL=postgresql://auth_manager:auth_manager@postgres:5432/auth_manager
+AUTH_ENCRYPTION_KEY=
 LOGIN_SESSION_TTL_SECONDS=600
 WEB_LOGIN_USERNAME=
 WEB_LOGIN_PASSWORD=
@@ -157,7 +160,6 @@ WEB_LOGIN_SESSION_TTL_SECONDS=43200
 TRUSTED_PROXY_IPS=
 INTERNAL_NETWORK_CIDRS=127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7
 INTERNAL_API_TOKEN=
-RATE_LIMIT_PROBE_URL=https://api.openai.com/v1/models
 OPENAI_ORGANIZATION=
 OPENAI_PROJECT=
 OPENAI_TOKEN_URL=
@@ -186,6 +188,7 @@ Container defaults:
 - `CALLBACK_STORE_DIR=/root/.codex-switch/callbacks`
 - `CODEX_PROFILES_DIR=/root/.codex-switch/profiles`
 - `USAGE_DB_PATH=/root/.codex-switch/auth-manager.sqlite3`
+- `DATABASE_URL=postgresql://auth_manager:auth_manager@postgres:5432/auth_manager`
 
 Persistent named volumes:
 - `/root/.codex`

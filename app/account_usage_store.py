@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import calendar
+import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,6 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import settings
+
+try:  # Optional in tests that don't require Postgres.
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:  # pragma: no cover - fallback when psycopg is unavailable
+    psycopg = None
+    dict_row = None
 
 
 DEFAULT_WINDOW_TYPE = "daily"
@@ -31,6 +40,65 @@ class AccountUsageState:
     lifetime_used: int
     created_at: str
     updated_at: str
+
+
+def _db_url() -> str | None:
+    value = getattr(settings, "database_url", None)
+    if not value:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_postgres_configured() -> bool:
+    url = _db_url()
+    if not url:
+        return False
+    return url.startswith("postgres://") or url.startswith("postgresql://")
+
+
+class _CompatConnection:
+    def __init__(self, conn: Any, *, kind: str) -> None:
+        self._conn = conn
+        self._kind = kind
+
+    def __enter__(self) -> "_CompatConnection":
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self._conn.__exit__(exc_type, exc, tb)
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
+        query = sql
+        values: tuple[Any, ...] | list[Any] = params
+        if self._kind == "postgres":
+            query = _translate_sql_to_postgres(sql)
+        return self._conn.execute(query, values)
+
+
+def _translate_sql_to_postgres(sql: str) -> str:
+    query = sql
+    upper = query.strip().upper()
+    if upper.startswith("BEGIN IMMEDIATE"):
+        return "BEGIN"
+    if "PRAGMA " in upper:
+        return "SELECT 1"
+    if "INSERT OR IGNORE INTO" in upper:
+        table_match = re.search(r"INSERT OR IGNORE INTO\s+([A-Za-z0-9_]+)", query, re.IGNORECASE)
+        table = table_match.group(1).lower() if table_match else ""
+        query = re.sub(r"INSERT OR IGNORE INTO", "INSERT INTO", query, flags=re.IGNORECASE)
+        if table == "usage_rollovers":
+            query = (
+                query.rstrip()
+                + " ON CONFLICT (account_id, window_started_at, window_ended_at) DO NOTHING"
+            )
+        elif table == "app_meta":
+            query = query.rstrip() + " ON CONFLICT (key) DO NOTHING"
+        else:
+            query = query.rstrip() + " ON CONFLICT DO NOTHING"
+    query = query.replace("?", "%s")
+    return query
 
 
 def initialize_usage_store(db_path: Path | None = None) -> None:
@@ -755,6 +823,390 @@ def migrate_account_ids(id_map: dict[str, str], db_path: Path | None = None) -> 
     return changed
 
 
+def upsert_saved_profile(
+    *,
+    label: str,
+    account_key: str,
+    auth_json: dict[str, Any],
+    email: str | None = None,
+    name: str | None = None,
+    subject: str | None = None,
+    user_id: str | None = None,
+    provider_account_id: str | None = None,
+    now: datetime | None = None,
+    db_path: Path | None = None,
+) -> None:
+    clean_label = (label or "").strip()
+    if not clean_label:
+        raise ValueError("label is required")
+    clean_account_key = (account_key or "").strip() or "unknown"
+    now_iso = _to_iso(_as_utc(now))
+    auth_payload = json.dumps(auth_json, sort_keys=True)
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        if _is_postgres_configured():
+            conn.execute(
+                """
+                INSERT INTO saved_profiles (
+                    label, account_key, email, name, subject, user_id, provider_account_id,
+                    auth_json, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                ON CONFLICT (label) DO UPDATE
+                SET account_key = EXCLUDED.account_key,
+                    email = EXCLUDED.email,
+                    name = EXCLUDED.name,
+                    subject = EXCLUDED.subject,
+                    user_id = EXCLUDED.user_id,
+                    provider_account_id = EXCLUDED.provider_account_id,
+                    auth_json = EXCLUDED.auth_json,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (
+                    clean_label,
+                    clean_account_key,
+                    email,
+                    name,
+                    subject,
+                    user_id,
+                    provider_account_id,
+                    auth_payload,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO saved_profiles (
+                    label, account_key, email, name, subject, user_id, provider_account_id,
+                    auth_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(label) DO UPDATE SET
+                    account_key = excluded.account_key,
+                    email = excluded.email,
+                    name = excluded.name,
+                    subject = excluded.subject,
+                    user_id = excluded.user_id,
+                    provider_account_id = excluded.provider_account_id,
+                    auth_json = excluded.auth_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    clean_label,
+                    clean_account_key,
+                    email,
+                    name,
+                    subject,
+                    user_id,
+                    provider_account_id,
+                    auth_payload,
+                    now_iso,
+                    now_iso,
+                ),
+            )
+
+
+def get_saved_profile(label: str, db_path: Path | None = None) -> dict[str, Any] | None:
+    clean = (label or "").strip()
+    if not clean:
+        return None
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT * FROM saved_profiles WHERE label = ?", (clean,)).fetchone()
+        if not row:
+            return None
+        return _row_to_saved_profile(row)
+
+
+def list_saved_profiles(db_path: Path | None = None) -> list[dict[str, Any]]:
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        rows = conn.execute("SELECT * FROM saved_profiles ORDER BY label ASC").fetchall()
+        return [_row_to_saved_profile(row) for row in rows]
+
+
+def delete_saved_profile(label: str, db_path: Path | None = None) -> bool:
+    clean = (label or "").strip()
+    if not clean:
+        return False
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        res = conn.execute("DELETE FROM saved_profiles WHERE label = ?", (clean,))
+        return bool(getattr(res, "rowcount", 0))
+
+
+def rename_saved_profile(old_label: str, new_label: str, db_path: Path | None = None) -> bool:
+    old = (old_label or "").strip()
+    new = (new_label or "").strip()
+    if not old or not new or old == new:
+        return False
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        exists = conn.execute("SELECT 1 FROM saved_profiles WHERE label = ?", (new,)).fetchone()
+        if exists:
+            raise ValueError(f"profile '{new}' already exists")
+        res = conn.execute("UPDATE saved_profiles SET label = ?, updated_at = ? WHERE label = ?", (new, _to_iso(datetime.now(timezone.utc)), old))
+        return bool(getattr(res, "rowcount", 0))
+
+
+def set_active_profile_label(label: str | None, db_path: Path | None = None) -> None:
+    now_iso = _to_iso(datetime.now(timezone.utc))
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            ("active_profile_label", (label or "").strip() or None, now_iso),
+        )
+        if label:
+            conn.execute(
+                "UPDATE saved_profiles SET switched_at = ?, last_used_at = ? WHERE label = ?",
+                (now_iso, now_iso, label),
+            )
+
+
+def get_active_profile_label(db_path: Path | None = None) -> str | None:
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT value FROM app_meta WHERE key = ?", ("active_profile_label",)).fetchone()
+        if not row:
+            return None
+        value = row["value"] if isinstance(row, dict) else row[0]
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+
+def touch_profile_last_used(label: str, db_path: Path | None = None) -> None:
+    clean = (label or "").strip()
+    if not clean:
+        return
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            "UPDATE saved_profiles SET last_used_at = ?, updated_at = ? WHERE label = ?",
+            (_to_iso(datetime.now(timezone.utc)), _to_iso(datetime.now(timezone.utc)), clean),
+        )
+
+
+def get_meta_value(key: str, db_path: Path | None = None) -> str | None:
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        value = row["value"] if isinstance(row, dict) else row[0]
+        return str(value) if value is not None else None
+
+
+def set_meta_value(key: str, value: str | None, db_path: Path | None = None) -> None:
+    now_iso = _to_iso(datetime.now(timezone.utc))
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, now_iso),
+        )
+
+
+def migrate_legacy_local_state(
+    *,
+    sqlite_usage_path: Path | None = None,
+    profiles_dir: Path | None = None,
+    db_path: Path | None = None,
+) -> dict[str, int]:
+    result = {
+        "profiles_migrated": 0,
+        "accounts_migrated": 0,
+        "rollovers_migrated": 0,
+        "snapshots_migrated": 0,
+        "absolute_snapshots_migrated": 0,
+    }
+    if not _is_postgres_configured():
+        return result
+    if get_meta_value("legacy_migration_v1_complete", db_path=db_path) == "1":
+        return result
+
+    src_profiles = profiles_dir or settings.profiles_dir()
+    if src_profiles.exists():
+        for path in sorted(src_profiles.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text())
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            auth_json = payload.get("authJson") if isinstance(payload.get("authJson"), dict) else payload
+            if not isinstance(auth_json, dict):
+                continue
+            from .account_identity import extract_account_identity
+            identity = extract_account_identity(auth_json)
+            upsert_saved_profile(
+                label=path.stem,
+                account_key=identity.account_key or path.stem,
+                auth_json=auth_json,
+                email=identity.email,
+                name=identity.name,
+                subject=identity.subject,
+                user_id=identity.user_id,
+                provider_account_id=identity.account_id,
+                db_path=db_path,
+            )
+            result["profiles_migrated"] += 1
+
+    src_sqlite = sqlite_usage_path or settings.usage_db_file()
+    if src_sqlite.exists():
+        source = sqlite3.connect(src_sqlite)
+        source.row_factory = sqlite3.Row
+        try:
+            with _connect(db_path) as dest:
+                _ensure_schema(dest)
+                src_tables = {str(r["name"]) for r in source.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+                if "accounts" in src_tables:
+                    rows = source.execute("SELECT * FROM accounts").fetchall()
+                    for row in rows:
+                        dest.execute(
+                            """
+                            INSERT INTO accounts (
+                                id, provider_account_id, name, rate_limit_window_type, usage_limit, usage_in_window,
+                                rate_limit_refresh_at, rate_limit_last_refreshed_at, primary_used_percent, primary_resets_at,
+                                secondary_used_percent, secondary_resets_at, last_usage_sync_at, lifetime_used, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(id) DO UPDATE SET
+                                provider_account_id = excluded.provider_account_id,
+                                name = excluded.name,
+                                rate_limit_window_type = excluded.rate_limit_window_type,
+                                usage_limit = excluded.usage_limit,
+                                usage_in_window = excluded.usage_in_window,
+                                rate_limit_refresh_at = excluded.rate_limit_refresh_at,
+                                rate_limit_last_refreshed_at = excluded.rate_limit_last_refreshed_at,
+                                primary_used_percent = excluded.primary_used_percent,
+                                primary_resets_at = excluded.primary_resets_at,
+                                secondary_used_percent = excluded.secondary_used_percent,
+                                secondary_resets_at = excluded.secondary_resets_at,
+                                last_usage_sync_at = excluded.last_usage_sync_at,
+                                lifetime_used = excluded.lifetime_used,
+                                updated_at = excluded.updated_at
+                            """,
+                            (
+                                row["id"],
+                                row["provider_account_id"] if "provider_account_id" in row.keys() else None,
+                                row["name"] if "name" in row.keys() else None,
+                                row["rate_limit_window_type"] if "rate_limit_window_type" in row.keys() else DEFAULT_WINDOW_TYPE,
+                                row["usage_limit"] if "usage_limit" in row.keys() else 0,
+                                row["usage_in_window"] if "usage_in_window" in row.keys() else 0,
+                                row["rate_limit_refresh_at"] if "rate_limit_refresh_at" in row.keys() else _to_iso(datetime.now(timezone.utc)),
+                                row["rate_limit_last_refreshed_at"] if "rate_limit_last_refreshed_at" in row.keys() else None,
+                                row["primary_used_percent"] if "primary_used_percent" in row.keys() else None,
+                                row["primary_resets_at"] if "primary_resets_at" in row.keys() else None,
+                                row["secondary_used_percent"] if "secondary_used_percent" in row.keys() else None,
+                                row["secondary_resets_at"] if "secondary_resets_at" in row.keys() else None,
+                                row["last_usage_sync_at"] if "last_usage_sync_at" in row.keys() else None,
+                                row["lifetime_used"] if "lifetime_used" in row.keys() else 0,
+                                row["created_at"] if "created_at" in row.keys() else _to_iso(datetime.now(timezone.utc)),
+                                row["updated_at"] if "updated_at" in row.keys() else _to_iso(datetime.now(timezone.utc)),
+                            ),
+                        )
+                        result["accounts_migrated"] += 1
+                if "usage_rollovers" in src_tables:
+                    rows = source.execute("SELECT * FROM usage_rollovers").fetchall()
+                    for row in rows:
+                        dest.execute(
+                            """
+                            INSERT INTO usage_rollovers (
+                                account_id, window_started_at, window_ended_at, usage_limit, usage_used, usage_wasted,
+                                primary_percent_at_reset, secondary_percent_at_reset, rolled_over_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT (account_id, window_started_at, window_ended_at) DO NOTHING
+                            """,
+                            (
+                                row["account_id"],
+                                row["window_started_at"],
+                                row["window_ended_at"],
+                                row["usage_limit"],
+                                row["usage_used"],
+                                row["usage_wasted"],
+                                row["primary_percent_at_reset"] if "primary_percent_at_reset" in row.keys() else None,
+                                row["secondary_percent_at_reset"] if "secondary_percent_at_reset" in row.keys() else None,
+                                row["rolled_over_at"],
+                            ),
+                        )
+                        result["rollovers_migrated"] += 1
+                if "usage_snapshots" in src_tables:
+                    rows = source.execute("SELECT account_id, primary_used_percent, secondary_used_percent, captured_at FROM usage_snapshots").fetchall()
+                    for row in rows:
+                        dest.execute(
+                            "INSERT INTO usage_snapshots (account_id, primary_used_percent, secondary_used_percent, captured_at) VALUES (?, ?, ?, ?)",
+                            (row["account_id"], row["primary_used_percent"], row["secondary_used_percent"], row["captured_at"]),
+                        )
+                        result["snapshots_migrated"] += 1
+                if "usage_absolute_snapshots" in src_tables:
+                    rows = source.execute(
+                        """
+                        SELECT account_id, captured_at, usage_in_window, usage_limit, lifetime_used,
+                               rate_limit_refresh_at, primary_used_percent, secondary_used_percent
+                        FROM usage_absolute_snapshots
+                        """
+                    ).fetchall()
+                    for row in rows:
+                        dest.execute(
+                            """
+                            INSERT INTO usage_absolute_snapshots (
+                                account_id, captured_at, usage_in_window, usage_limit, lifetime_used,
+                                rate_limit_refresh_at, primary_used_percent, secondary_used_percent
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                row["account_id"],
+                                row["captured_at"],
+                                row["usage_in_window"],
+                                row["usage_limit"],
+                                row["lifetime_used"],
+                                row["rate_limit_refresh_at"],
+                                row["primary_used_percent"],
+                                row["secondary_used_percent"],
+                            ),
+                        )
+                        result["absolute_snapshots_migrated"] += 1
+        finally:
+            source.close()
+
+    set_meta_value("legacy_migration_v1_complete", "1", db_path=db_path)
+    return result
+
+
+def _row_to_saved_profile(row: Any) -> dict[str, Any]:
+    raw_auth = row["auth_json"] if isinstance(row, dict) else row[7]
+    if isinstance(raw_auth, (dict, list)):
+        auth_obj = raw_auth
+    else:
+        text = str(raw_auth or "")
+        try:
+            auth_obj = json.loads(text) if text else {}
+        except Exception:
+            auth_obj = {}
+    return {
+        "label": str(row["label"]) if isinstance(row, dict) else str(row[0]),
+        "account_key": str(row["account_key"]) if isinstance(row, dict) else str(row[1]),
+        "email": row["email"] if isinstance(row, dict) else row[2],
+        "name": row["name"] if isinstance(row, dict) else row[3],
+        "subject": row["subject"] if isinstance(row, dict) else row[4],
+        "user_id": row["user_id"] if isinstance(row, dict) else row[5],
+        "provider_account_id": row["provider_account_id"] if isinstance(row, dict) else row[6],
+        "auth_json": auth_obj if isinstance(auth_obj, dict) else {},
+        "created_at": row["created_at"] if isinstance(row, dict) else row[8],
+        "updated_at": row["updated_at"] if isinstance(row, dict) else row[9],
+        "last_used_at": row["last_used_at"] if isinstance(row, dict) else row[10],
+        "switched_at": row["switched_at"] if isinstance(row, dict) else row[11],
+    }
+
+
 def _refresh_account_window_if_needed_locked(
     conn: sqlite3.Connection, account_id: str, now_dt: datetime
 ) -> sqlite3.Row:
@@ -833,16 +1285,176 @@ def _refresh_account_window_if_needed_locked(
     return latest
 
 
-def _connect(db_path: Path | None) -> sqlite3.Connection:
+def _connect(db_path: Path | None) -> _CompatConnection:
+    if _is_postgres_configured():
+        if psycopg is None:
+            raise RuntimeError("DATABASE_URL is configured for Postgres but psycopg is not installed")
+        conn = psycopg.connect(_db_url(), autocommit=True, row_factory=dict_row)
+        return _CompatConnection(conn, kind="postgres")
+
     path = db_path or settings.usage_db_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return _CompatConnection(conn, kind="sqlite")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
+def _ensure_schema(conn: Any) -> None:
+    if _is_postgres_configured():
+        _ensure_schema_postgres(conn)
+        return
+    _ensure_schema_sqlite(conn)
+
+
+def _ensure_schema_postgres(conn: Any) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS accounts (
+            id TEXT PRIMARY KEY,
+            provider_account_id TEXT NULL,
+            name TEXT NULL,
+            rate_limit_window_type TEXT NOT NULL,
+            usage_limit BIGINT NOT NULL DEFAULT 0,
+            usage_in_window BIGINT NOT NULL DEFAULT 0,
+            rate_limit_refresh_at TEXT NOT NULL,
+            rate_limit_last_refreshed_at TEXT NULL,
+            primary_used_percent DOUBLE PRECISION NULL,
+            primary_resets_at TEXT NULL,
+            secondary_used_percent DOUBLE PRECISION NULL,
+            secondary_resets_at TEXT NULL,
+            last_usage_sync_at TEXT NULL,
+            lifetime_used BIGINT NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_profiles (
+            label TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL,
+            email TEXT NULL,
+            name TEXT NULL,
+            subject TEXT NULL,
+            user_id TEXT NULL,
+            provider_account_id TEXT NULL,
+            auth_json JSONB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_used_at TEXT NULL,
+            switched_at TEXT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_rollovers (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            window_started_at TEXT NOT NULL,
+            window_ended_at TEXT NOT NULL,
+            usage_limit BIGINT NOT NULL,
+            usage_used BIGINT NOT NULL,
+            usage_wasted BIGINT NOT NULL,
+            rolled_over_at TEXT NOT NULL,
+            primary_percent_at_reset DOUBLE PRECISION NULL,
+            secondary_percent_at_reset DOUBLE PRECISION NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_rollovers_window_unique ON usage_rollovers(account_id, window_started_at, window_ended_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_accounts_rate_limit_refresh_at ON accounts(rate_limit_refresh_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_rollovers_account_id ON usage_rollovers(account_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_rollovers_window_ended_at ON usage_rollovers(window_ended_at)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_snapshots (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            primary_used_percent DOUBLE PRECISION NULL,
+            secondary_used_percent DOUBLE PRECISION NULL,
+            captured_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_snapshots_account_captured ON usage_snapshots(account_id, captured_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_snapshots_captured ON usage_snapshots(captured_at)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS usage_absolute_snapshots (
+            id BIGSERIAL PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL,
+            usage_in_window BIGINT NULL,
+            usage_limit BIGINT NULL,
+            lifetime_used BIGINT NULL,
+            rate_limit_refresh_at TEXT NULL,
+            primary_used_percent DOUBLE PRECISION NULL,
+            secondary_used_percent DOUBLE PRECISION NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_absolute_snapshots_account_captured ON usage_absolute_snapshots(account_id, captured_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_usage_absolute_snapshots_captured ON usage_absolute_snapshots(captured_at)"
+    )
+
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS provider_account_id TEXT NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS name TEXT NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS primary_used_percent DOUBLE PRECISION NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS primary_resets_at TEXT NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS secondary_used_percent DOUBLE PRECISION NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS secondary_resets_at TEXT NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_usage_sync_at TEXT NULL")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS lifetime_used BIGINT NOT NULL DEFAULT 0")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
+    conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
+
+    now_iso = _to_iso(datetime.now(timezone.utc))
+    conn.execute(
+        """
+        UPDATE accounts
+        SET rate_limit_window_type = COALESCE(NULLIF(rate_limit_window_type, ''), %s),
+            usage_limit = COALESCE(usage_limit, 0),
+            usage_in_window = COALESCE(usage_in_window, 0),
+            lifetime_used = COALESCE(lifetime_used, 0),
+            rate_limit_refresh_at = COALESCE(NULLIF(rate_limit_refresh_at, ''), %s),
+            created_at = COALESCE(NULLIF(created_at, ''), %s),
+            updated_at = COALESCE(NULLIF(updated_at, ''), %s)
+        """,
+        (DEFAULT_WINDOW_TYPE, now_iso, now_iso, now_iso),
+    )
+
+
+def _ensure_schema_sqlite(conn: Any) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS accounts (
@@ -957,6 +1569,36 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_absolute_snapshots_captured ON usage_absolute_snapshots(captured_at)"
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS saved_profiles (
+            label TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL,
+            email TEXT NULL,
+            name TEXT NULL,
+            subject TEXT NULL,
+            user_id TEXT NULL,
+            provider_account_id TEXT NULL,
+            auth_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_used_at TEXT NULL,
+            switched_at TEXT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_profiles_account_key ON saved_profiles(account_key)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_profiles_email ON saved_profiles(email)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
     )
 
     # Add percentage columns to rollovers if missing
