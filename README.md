@@ -42,7 +42,6 @@ Auth profile manager for Codex CLI with:
 - `GET /api/accounts`
 - `GET /api/accounts/cached`
 - `GET /api/accounts/stream` (SSE)
-- `GET /api/accounts/next-available?include_auth=false|true` (best account by weekly remaining usage + next weekly refresh)
 - `GET /api/usage/aggregate`
 - `GET /api/usage/history?range=7d|30d|90d|all`
 - `GET /api/accounts/{label}/history?range=7d|30d|90d|all`
@@ -61,7 +60,7 @@ Auth profile manager for Codex CLI with:
 
 ## Environment
 
-Use `.env.example` or `.env.sample` as your template.
+Use `.env.example` as your template.
 
 Core runtime:
 - `CODEX_CLI_BIN`
