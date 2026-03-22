@@ -42,6 +42,7 @@ Auth profile manager for Codex CLI with:
 - `GET /api/accounts`
 - `GET /api/accounts/cached`
 - `GET /api/accounts/stream` (SSE)
+- `GET /api/accounts/next-available?include_auth=false|true` (best account by weekly remaining usage + next weekly refresh)
 - `GET /api/usage/aggregate`
 - `GET /api/usage/history?range=7d|30d|90d|all`
 - `GET /api/accounts/{label}/history?range=7d|30d|90d|all`
@@ -123,6 +124,51 @@ docker compose up --build
 Services:
 - API/backend: `http://localhost:8080`
 - Frontend dev server: `http://localhost:5173`
+
+## Chrome Extension
+
+The extension is in `chrome-extension/` and relays localhost OAuth callbacks back to auth-manager.
+
+### Install (Unpacked)
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select this repo's `chrome-extension/` folder.
+
+### Configure
+1. Open extension **Settings** (Options page).
+2. Set **Auth Manager Base URL** (for example `https://your-domain` or `http://localhost:8080`).
+3. If your backend uses `INTERNAL_API_TOKEN`, set **Internal API Bearer Token**.
+4. Save settings.
+
+### Use
+1. Open the extension popup.
+2. Click **Start Relay Login**.
+3. Complete login in the opened auth tab.
+4. Extension captures localhost callback and posts it to `/auth/relay-callback`.
+5. Back in Auth Manager UI, paste callback URL in **Add Account** modal when prompted.
+
+### Important: Localhost Port Conflicts (1445/1455)
+
+If VS Code (or any other local tool) is using localhost auth callback ports like `1445` or `1455`, relay auth can fail intermittently.
+
+Typical symptoms:
+- auth appears to hang
+- callback tab returns a localhost callback URL but nothing happens
+- callback is captured but profile is not finalized automatically
+
+To avoid first-run issues:
+- close/disable local tools that may intercept localhost callback ports (especially VS Code auth integrations)
+- retry **Start Relay Login** after those tools are stopped
+
+If callback was returned but not processed:
+- copy the full callback URL
+- paste it into the **Add Account** modal in the app
+- submit it so auth-manager can relay/finalize it
+
+### Shortcuts
+- Open popup: `Ctrl+Shift+Y` (`Command+Shift+Y` on macOS)
+- Start relay login: `Ctrl+Shift+L` (`Command+Shift+L` on macOS)
 
 ## Notes
 

@@ -6,22 +6,20 @@
     <title>Codex Auth Relay</title>
     <style>
       :root {
-        --bg: #091016;
-        --panel: #15202b;
-        --text: #ecf3ff;
-        --muted: #a1aec2;
-        --accent-2: #97f7b1;
-        --border: rgba(255, 255, 255, 0.1);
+        --bg: #0a0a0a;
+        --panel: #171717;
+        --text: #ededed;
+        --muted: #a3a3a3;
+        --ok: #10b981;
+        --border: #2b2b2b;
       }
       body {
-        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: radial-gradient(circle at 85% -10%, rgba(133,214,255,0.18), transparent 40%),
-                    radial-gradient(circle at 10% 120%, rgba(151,247,177,0.15), transparent 45%),
-                    var(--bg);
+        background: var(--bg);
         color: var(--text);
       }
       .panel {
@@ -31,14 +29,21 @@
         border-radius: 12px;
         padding: 20px;
       }
-      h1 { margin-top: 0; font-size: 20px; }
+      h1 { margin-top: 0; font-size: 20px; display:flex; align-items:center; gap:10px; }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+      }
       p { line-height: 1.5; color: var(--muted); }
-      p:first-of-type { color: var(--accent-2); font-weight: 600; }
+      p:first-of-type { color: var(--ok); font-weight: 600; }
     </style>
   </head>
   <body>
     <div class="panel">
-      <h1>Login completed</h1>
+      <h1><span class="dot"></span>Login completed</h1>
       <p>The OAuth callback was relayed to auth-manager.</p>
       <p>You can close this tab.</p>
     </div>

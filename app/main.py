@@ -979,6 +979,47 @@ async def api_accounts_cached(request: Request) -> JSONResponse:
     return JSONResponse(snapshot)
 
 
+@app.get("/api/accounts/next-available")
+async def api_next_available_account(
+    request: Request,
+    include_auth: bool = False,
+) -> JSONResponse:
+    _require_internal_auth(request)
+    snapshot = _build_cached_accounts_snapshot()
+    accounts = snapshot.get("accounts") if isinstance(snapshot, dict) else []
+    if not isinstance(accounts, list) or not accounts:
+        return JSONResponse({"recommended": None, "candidates": [], "reason": "no_accounts"})
+
+    ranked = sorted(
+        (_rank_account_for_weekly_availability(account) for account in accounts if isinstance(account, dict)),
+        key=lambda item: (
+            float(item.get("score") or -1.0),
+            float(item.get("weekly_remaining_percent") or -1.0),
+            -1.0 * float(item.get("seconds_to_weekly_reset") or 9_999_999_999),
+        ),
+        reverse=True,
+    )
+    if not ranked:
+        return JSONResponse({"recommended": None, "candidates": [], "reason": "no_rankable_accounts"})
+
+    best = dict(ranked[0])
+    label = str(best.get("label") or "")
+    if include_auth and label:
+        saved = get_saved_profile(label)
+        if saved and isinstance(saved.get("auth_json"), dict):
+            best["auth_json"] = saved.get("auth_json")
+
+    return JSONResponse(
+        {
+            "recommended": best,
+            "candidates": ranked,
+            "evaluated": len(ranked),
+            "current_label": snapshot.get("current_label"),
+            "selection_basis": "weekly_remaining_usage_then_next_weekly_refresh",
+        }
+    )
+
+
 @app.get("/api/accounts/stream")
 async def api_accounts_stream(request: Request) -> StreamingResponse:
     _require_internal_auth_or_query(request)
@@ -1812,6 +1853,109 @@ def _compute_aggregate(accounts: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_accounts": failed_count,
         "last_refresh_time": _LAST_REFRESH_COMPLETED_AT or last_refresh,
     }
+
+
+def _rank_account_for_weekly_availability(account: dict[str, Any]) -> dict[str, Any]:
+    label = str(account.get("label") or "")
+    weekly = _extract_weekly_metrics(account)
+    remaining = weekly["remaining_percent"]
+    seconds_to_reset = weekly["seconds_to_reset"]
+    # Weight remaining weekly capacity highest; use reset timing as secondary factor.
+    reset_bonus = 0.0
+    if seconds_to_reset is not None:
+        week = 7 * 24 * 60 * 60
+        clamped = max(0.0, min(float(week), float(seconds_to_reset)))
+        reset_bonus = (1.0 - (clamped / float(week))) * 20.0
+    score = float(remaining) + reset_bonus
+
+    return {
+        "label": label,
+        "account_key": account.get("account_key"),
+        "display_label": account.get("display_label"),
+        "email": account.get("email"),
+        "is_current": bool(account.get("is_current")),
+        "weekly_used_percent": round(float(weekly["used_percent"]), 2),
+        "weekly_remaining_percent": round(float(remaining), 2),
+        "weekly_resets_at": weekly["resets_at"],
+        "seconds_to_weekly_reset": seconds_to_reset,
+        "score": round(score, 4),
+    }
+
+
+def _extract_weekly_metrics(account: dict[str, Any]) -> dict[str, Any]:
+    rate_limits = account.get("rate_limits") if isinstance(account, dict) else {}
+    usage_tracking = account.get("usage_tracking") if isinstance(account, dict) else {}
+    secondary = None
+    if isinstance(rate_limits, dict):
+        secondary = rate_limits.get("secondary") or rate_limits.get("tokens")
+    used_percent = None
+    resets_at = None
+    if isinstance(secondary, dict):
+        pct = secondary.get("percent")
+        if isinstance(pct, (int, float)):
+            used_percent = float(pct)
+        raw_reset = (
+            secondary.get("resetsAt")
+            or secondary.get("resetAt")
+            or secondary.get("nextResetAt")
+            or secondary.get("reset")
+        )
+        parsed = _parse_maybe_datetime(raw_reset)
+        if parsed is not None:
+            resets_at = parsed.isoformat()
+    if used_percent is None and isinstance(usage_tracking, dict):
+        cached_pct = usage_tracking.get("secondary_used_percent")
+        if isinstance(cached_pct, (int, float)):
+            used_percent = float(cached_pct)
+    if resets_at is None and isinstance(usage_tracking, dict):
+        parsed = _parse_maybe_datetime(usage_tracking.get("secondary_resets_at"))
+        if parsed is not None:
+            resets_at = parsed.isoformat()
+
+    if used_percent is None:
+        used_percent = 100.0
+    used_percent = max(0.0, min(100.0, float(used_percent)))
+    remaining_percent = max(0.0, 100.0 - used_percent)
+    seconds_to_reset = None
+    parsed_reset = _parse_maybe_datetime(resets_at)
+    if parsed_reset is not None:
+        seconds_to_reset = max(0, int((parsed_reset - datetime.now(timezone.utc)).total_seconds()))
+
+    return {
+        "used_percent": used_percent,
+        "remaining_percent": remaining_percent,
+        "resets_at": resets_at,
+        "seconds_to_reset": seconds_to_reset,
+    }
+
+
+def _parse_maybe_datetime(raw: Any) -> datetime | None:
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, (int, float)):
+        if int(raw) <= 0:
+            return None
+        dt = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+    elif isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        if text.isdigit():
+            dt = datetime.fromtimestamp(int(text), tz=timezone.utc)
+        else:
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt
 
 
 def _sse_event(event_name: str, payload: dict[str, Any]) -> str:

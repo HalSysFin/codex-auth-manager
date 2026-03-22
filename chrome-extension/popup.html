@@ -6,31 +6,37 @@
     <title>Codex Auth Relay</title>
     <style>
       :root {
-        --bg: #091016;
-        --panel: #15202b;
-        --text: #ecf3ff;
-        --muted: #a1aec2;
-        --accent: #85d6ff;
-        --accent-2: #97f7b1;
-        --danger: #ff8a8a;
-        --border: rgba(255, 255, 255, 0.1);
+        --bg: #0a0a0a;
+        --panel: #171717;
+        --text: #ededed;
+        --muted: #a3a3a3;
+        --border: #2b2b2b;
+        --ok: #10b981;
+        --warn: #f59e0b;
       }
       body {
         margin: 0;
         width: 340px;
-        font-family: "Space Grotesk", "Segoe UI", sans-serif;
-        background: radial-gradient(circle at 85% -10%, rgba(133,214,255,0.18), transparent 40%),
-                    radial-gradient(circle at 10% 120%, rgba(151,247,177,0.15), transparent 45%),
-                    var(--bg);
+        font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
+        background: var(--bg);
         color: var(--text);
       }
       .wrap {
-        padding: 14px 14px 12px;
+        padding: 14px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px;
       }
       h1 {
         margin: 0 0 8px;
         font-size: 16px;
-        letter-spacing: 0.3px;
+        letter-spacing: 0.2px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
       }
       p {
         margin: 0 0 12px;
@@ -38,48 +44,66 @@
         line-height: 1.4;
         color: var(--muted);
       }
-      button {
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--ok);
+        box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+      }
+      .btn {
         width: 100%;
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 10px 12px;
         font-weight: 600;
-        background: linear-gradient(90deg, #2a7db0, #25a26f);
-        color: #f8fdff;
+        background: #171717;
+        color: var(--text);
         cursor: pointer;
       }
-      button:disabled {
+      .btn:hover {
+        border-color: #3a3a3a;
+      }
+      .btn:disabled {
         opacity: 0.6;
         cursor: default;
       }
-      .row {
-        margin-top: 10px;
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
+      .btn.primary {
+        background: #ededed;
+        color: #0a0a0a;
+        border: none;
       }
-      .link-btn {
+      .btn.link {
+        margin-top: 8px;
+        padding: 0;
+        height: auto;
         border: 0;
         background: transparent;
-        color: var(--accent);
+        color: #cbd5e1;
         font-size: 12px;
-        padding: 0;
-        cursor: pointer;
+        text-align: left;
+      }
+      .footer {
+        margin-top: 10px;
+        font-size: 11px;
+        color: #737373;
+        line-height: 1.45;
       }
       .status {
         margin-top: 10px;
         font-size: 12px;
         white-space: pre-wrap;
         color: var(--muted);
+        min-height: 16px;
       }
       .ok {
-        color: var(--accent-2);
+        color: var(--ok);
       }
       .err {
-        color: var(--danger);
+        color: var(--warn);
       }
       code {
-        background: rgba(255, 255, 255, 0.06);
+        background: #111;
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 1px 5px;
@@ -89,17 +113,17 @@
   </head>
   <body>
     <div class="wrap">
-      <h1>Codex Auth Relay</h1>
-      <p>Start login relay, then complete auth in the opened tab. Localhost callback will be captured and relayed automatically.</p>
-      <button id="startBtn" type="button">Start Relay Login</button>
-      <div class="row">
-        <button id="optionsBtn" class="link-btn" type="button">Settings</button>
+      <div class="card">
+        <h1><span class="dot"></span>Auth Relay</h1>
+        <p>Start relay login, complete auth in the opened tab, then localhost callback is captured and sent to auth-manager.</p>
+        <button id="startBtn" class="btn primary" type="button">Start Relay Login</button>
+        <button id="optionsBtn" class="btn link" type="button">Settings</button>
+        <div id="status" class="status"></div>
+        <div class="footer">
+          Open popup: <code>Ctrl+Shift+Y</code><br />
+          Start relay: <code>Ctrl+Shift+L</code>
+        </div>
       </div>
-      <div id="status" class="status"></div>
-      <p style="margin-top: 12px; margin-bottom: 0; font-size: 11px; color: #4b5568;">
-        Shortcut to open popup: <code>Ctrl+Shift+Y</code><br />
-        Direct start shortcut: <code>Ctrl+Shift+L</code>
-      </p>
     </div>
     <script src="popup.js"></script>
   </body>

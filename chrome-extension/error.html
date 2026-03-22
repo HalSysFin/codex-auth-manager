@@ -6,22 +6,20 @@
     <title>Codex Auth Relay Error</title>
     <style>
       :root {
-        --bg: #091016;
-        --panel: #15202b;
-        --text: #ecf3ff;
-        --muted: #a1aec2;
-        --danger: #ff8a8a;
-        --border: rgba(255, 255, 255, 0.1);
+        --bg: #0a0a0a;
+        --panel: #171717;
+        --text: #ededed;
+        --muted: #a3a3a3;
+        --warn: #f59e0b;
+        --border: #2b2b2b;
       }
       body {
-        font-family: "Space Grotesk", "Segoe UI", sans-serif;
+        font-family: Inter, system-ui, -apple-system, Segoe UI, sans-serif;
         margin: 0;
         min-height: 100vh;
         display: grid;
         place-items: center;
-        background: radial-gradient(circle at 85% -10%, rgba(255,138,138,0.2), transparent 45%),
-                    radial-gradient(circle at 10% 120%, rgba(133,214,255,0.15), transparent 45%),
-                    var(--bg);
+        background: var(--bg);
         color: var(--text);
       }
       .panel {
@@ -37,11 +35,11 @@
         display: block;
         white-space: pre-wrap;
         margin-top: 8px;
-        background: rgba(255, 255, 255, 0.06);
+        background: #111;
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 8px;
-        color: var(--danger);
+        color: var(--warn);
       }
     </style>
   </head>
