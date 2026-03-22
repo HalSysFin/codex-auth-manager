@@ -188,6 +188,11 @@ type UsageHistoryResponse = {
   }
 }
 
+type SessionStatus = {
+  web_login_enabled: boolean
+  session_valid: boolean
+}
+
 const defaultAggregate: Aggregate = {
   accounts: 0,
   total_current_window_used: 0,
@@ -344,6 +349,17 @@ function App() {
   const [actionApiKey, setActionApiKey] = useState('')
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
+  const [addAccountModalOpen, setAddAccountModalOpen] = useState(false)
+  const [addAccountLoading, setAddAccountLoading] = useState(false)
+  const [addAuthUrl, setAddAuthUrl] = useState('')
+  const [addSessionId, setAddSessionId] = useState('')
+  const [addRelayToken, setAddRelayToken] = useState('')
+  const [addCallbackUrl, setAddCallbackUrl] = useState('')
+  const [addLabelInput, setAddLabelInput] = useState('')
+  const [importAuthModalOpen, setImportAuthModalOpen] = useState(false)
+  const [importAuthText, setImportAuthText] = useState('')
+  const [importAuthLabel, setImportAuthLabel] = useState('')
+  const [importAuthLoading, setImportAuthLoading] = useState(false)
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
@@ -501,6 +517,18 @@ function App() {
     setUsageHistory(data)
   }
 
+  const loadSessionStatus = async (): Promise<SessionStatus> => {
+    const res = await fetch('/api/session/status', { credentials: 'include' })
+    if (!res.ok) {
+      return { web_login_enabled: true, session_valid: false }
+    }
+    const payload = (await res.json()) as SessionStatus
+    return {
+      web_login_enabled: Boolean(payload.web_login_enabled),
+      session_valid: Boolean(payload.session_valid),
+    }
+  }
+
   const startStream = (token: string) => {
     if (!token.trim()) return
     stopStream()
@@ -557,7 +585,26 @@ function App() {
     })
 
     es.addEventListener('error', (ev) => {
-      const msg = (ev as MessageEvent).data || 'Refresh error'
+      const raw = (ev as MessageEvent).data
+      let msg = 'Refresh error'
+      try {
+        const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
+        if (parsed && typeof parsed === 'object') {
+          const label = typeof parsed.label === 'string' ? parsed.label : null
+          const reason = typeof parsed.message === 'string' ? parsed.message : null
+          if (label && reason) {
+            msg = `${label}: ${reason}`
+          } else if (reason) {
+            msg = reason
+          }
+        } else if (typeof raw === 'string' && raw.trim()) {
+          msg = raw
+        }
+      } catch {
+        if (typeof raw === 'string' && raw.trim()) {
+          msg = raw
+        }
+      }
       setErr(msg)
     })
 
@@ -631,49 +678,126 @@ function App() {
     if (!apiKey.trim()) return
     setErr(null)
     await loadCached(apiKey)
-    startStream(hasActionApiKey ? actionApiKey : apiKey)
+    startStream(apiKey)
   }
 
-  const importCurrent = async () => {
-    if (!apiKey.trim()) return
-    if (!requireActionApiKey('import')) return
-    setErr(null)
-    setStatus('Importing current auth...')
-    await requestJson('/auth/import-current', actionApiKey, { method: 'POST', body: '{}' })
-    await refreshNow()
-    setStatus('Imported current auth')
-  }
-
-  const addAccount = async () => {
+  const startAddAccount = async () => {
     if (!apiKey.trim()) return
     setErr(null)
+    setAddAccountLoading(true)
     try {
       const start = await requestJson<{ auth_url?: string; session_id?: string; relay_token?: string; instructions?: string }>(
         '/auth/login/start-relay',
         apiKey,
         { method: 'POST', body: '{}' },
       )
-      if (start.auth_url) window.open(start.auth_url, '_blank', 'noopener,noreferrer')
-      const callbackUrl = window.prompt('Paste full callback URL from the auth tab:')?.trim()
-      if (!callbackUrl) return
-      const label = window.prompt('Optional profile label (leave empty for auto):')?.trim() || undefined
-      await requestJson(
-        '/auth/relay-callback',
-        apiKey,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            full_url: callbackUrl,
-            relay_token: start.relay_token,
-            session_id: start.session_id,
-            label,
-          }),
-        },
-      )
-      setStatus('Callback relayed. Refreshing...')
-      await refreshNow()
+      const authUrl = (start.auth_url || '').trim()
+      if (authUrl) {
+        window.open(authUrl, '_blank', 'noopener,noreferrer')
+      }
+      setAddAuthUrl(authUrl)
+      setAddSessionId((start.session_id || '').trim())
+      setAddRelayToken((start.relay_token || '').trim())
+      setAddCallbackUrl('')
+      setAddLabelInput('')
+      setAddAccountModalOpen(true)
+      setStatus('Login started. Complete auth, then paste callback URL.')
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Add account failed')
+    } finally {
+      setAddAccountLoading(false)
+    }
+  }
+
+  const submitAddAccountCallback = async () => {
+    if (!apiKey.trim()) return
+    const fullUrl = addCallbackUrl.trim()
+    if (!fullUrl || (!fullUrl.includes('code=') && !fullUrl.includes('error='))) {
+      setErr('Paste a full callback URL containing code= or error=')
+      return
+    }
+    if (!addSessionId || !addRelayToken) {
+      setErr('Login session is missing. Start Add Account again.')
+      return
+    }
+    setErr(null)
+    setAddAccountLoading(true)
+    try {
+      await requestJson('/auth/relay-callback', apiKey, {
+        method: 'POST',
+        body: JSON.stringify({
+          full_url: fullUrl,
+          relay_token: addRelayToken,
+          session_id: addSessionId,
+          label: addLabelInput.trim() || undefined,
+        }),
+      })
+      setAddAccountModalOpen(false)
+      setStatus('Callback relayed to Codex CLI. Refreshing...')
+      await refreshNow()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Callback relay failed')
+    } finally {
+      setAddAccountLoading(false)
+    }
+  }
+
+  const openImportAuthModal = () => {
+    if (!requireActionApiKey('import auth')) return
+    setImportAuthModalOpen(true)
+  }
+
+  const importAuthFromModal = async () => {
+    if (!apiKey.trim()) return
+    if (!requireActionApiKey('import auth')) return
+    const raw = importAuthText.trim()
+    if (!raw) {
+      setErr('Paste auth JSON or upload a JSON file')
+      return
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      setErr('Invalid JSON')
+      return
+    }
+    const base = parsed as Record<string, unknown>
+    const authJson =
+      base && typeof base === 'object' && base.authJson && typeof base.authJson === 'object'
+        ? (base.authJson as Record<string, unknown>)
+        : (parsed as Record<string, unknown>)
+
+    setErr(null)
+    setImportAuthLoading(true)
+    try {
+      await requestJson('/auth/import-json', actionApiKey, {
+        method: 'POST',
+        body: JSON.stringify({
+          auth_json: authJson,
+          label: importAuthLabel.trim() || undefined,
+        }),
+      })
+      setImportAuthModalOpen(false)
+      setImportAuthText('')
+      setImportAuthLabel('')
+      setStatus('Auth imported')
+      await refreshNow()
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Import auth failed')
+    } finally {
+      setImportAuthLoading(false)
+    }
+  }
+
+  const onImportAuthFile = async (file: File | null) => {
+    if (!file) return
+    try {
+      const text = await file.text()
+      setImportAuthText(text)
+      setStatus(`Loaded ${file.name}`)
+    } catch {
+      setErr('Unable to read uploaded file')
     }
   }
 
@@ -784,19 +908,32 @@ function App() {
 
   useEffect(() => {
     if (!apiKey.trim()) {
-      void requestJson('/api/public-stats', '')
-        .then(() => setApiKey(SESSION_TOKEN))
+      void loadSessionStatus()
+        .then((status) => {
+          if (status.session_valid) {
+            setApiKey(SESSION_TOKEN)
+          } else if (!status.web_login_enabled && actionApiKey.trim()) {
+            // In API-key mode, reuse the saved action key for read requests too.
+            setApiKey(actionApiKey.trim())
+          }
+        })
         .catch(() => {})
       return
     }
     void loadCached(apiKey)
       .then(async () => {
         await loadUsageHistory(apiKey, selectedRange)
-        startStream(hasActionApiKey ? actionApiKey : apiKey)
+        startStream(apiKey)
       })
-      .catch((e: unknown) => setErr(e instanceof Error ? e.message : 'Load failed'))
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : 'Load failed'
+        setErr(msg)
+        if (apiKey === SESSION_TOKEN && /api key required|401|403/i.test(msg)) {
+          setApiKey('')
+        }
+      })
     return () => stopStream()
-  }, [apiKey, actionApiKey, hasActionApiKey])
+  }, [apiKey, actionApiKey])
 
   useEffect(() => {
     if (!apiKey.trim()) return
@@ -845,8 +982,8 @@ function App() {
           >
             {hasActionApiKey ? 'API Key: Set' : 'API Key: Missing'}
           </button>
-          {mode === 'manager' ? <button className="btn primary" onClick={() => void addAccount()}>+ Add Account</button> : null}
-          {mode === 'manager' ? <button className="btn" onClick={() => void importCurrent()} disabled={!hasActionApiKey}>Import Current</button> : null}
+          {mode === 'manager' ? <button className="btn primary" onClick={() => void startAddAccount()} disabled={addAccountLoading}>+ Add Account</button> : null}
+          {mode === 'manager' ? <button className="btn" onClick={openImportAuthModal} disabled={!hasActionApiKey}>Import Auth</button> : null}
           <button className="btn" onClick={() => setMode((m) => (m === 'manager' ? 'stats' : 'manager'))}>
             {mode === 'manager' ? 'Overall Stats' : 'Back to Manager'}
           </button>
@@ -1222,6 +1359,88 @@ function App() {
               >
                 Clear
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {addAccountModalOpen ? (
+        <div className="modal-overlay" onClick={() => setAddAccountModalOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Add Account</h3>
+              <button className="btn btn-sm" onClick={() => setAddAccountModalOpen(false)}>Close</button>
+            </div>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Complete login in the opened auth tab, then paste the full callback URL below. This callback is passed to Codex CLI for finalization.
+            </p>
+            {addAuthUrl ? (
+              <div className="muted" style={{ marginBottom: 8 }}>
+                Auth URL opened. If needed, <a href={addAuthUrl} target="_blank" rel="noreferrer">open again</a>.
+              </div>
+            ) : null}
+            <textarea
+              className="auth-json-input"
+              value={addCallbackUrl}
+              onChange={(e) => setAddCallbackUrl(e.target.value)}
+              placeholder="Paste full callback URL (http://localhost.../auth/callback?... )"
+              rows={5}
+            />
+            <input
+              type="text"
+              value={addLabelInput}
+              onChange={(e) => setAddLabelInput(e.target.value)}
+              placeholder="Optional profile label"
+              className="api-key-input"
+              style={{ marginTop: 10 }}
+            />
+            <div className="top-actions" style={{ marginTop: 12 }}>
+              <button className="btn primary" onClick={() => void submitAddAccountCallback()} disabled={addAccountLoading}>
+                {addAccountLoading ? 'Submitting...' : 'Submit Callback'}
+              </button>
+              <button className="btn" onClick={() => setAddAccountModalOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {importAuthModalOpen ? (
+        <div className="modal-overlay" onClick={() => setImportAuthModalOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Import Auth</h3>
+              <button className="btn btn-sm" onClick={() => setImportAuthModalOpen(false)}>Close</button>
+            </div>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Paste auth JSON directly or upload a JSON file. The auth will be added to the system and matched/saved to a profile.
+            </p>
+            <textarea
+              className="auth-json-input"
+              value={importAuthText}
+              onChange={(e) => setImportAuthText(e.target.value)}
+              placeholder='Paste auth JSON here (raw auth object or wrapper containing "authJson")'
+              rows={10}
+            />
+            <div style={{ marginTop: 10 }}>
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={(e) => void onImportAuthFile(e.target.files?.[0] || null)}
+              />
+            </div>
+            <input
+              type="text"
+              value={importAuthLabel}
+              onChange={(e) => setImportAuthLabel(e.target.value)}
+              placeholder="Optional profile label"
+              className="api-key-input"
+              style={{ marginTop: 10 }}
+            />
+            <div className="top-actions" style={{ marginTop: 12 }}>
+              <button className="btn primary" onClick={() => void importAuthFromModal()} disabled={importAuthLoading}>
+                {importAuthLoading ? 'Importing...' : 'Import Auth'}
+              </button>
+              <button className="btn" onClick={() => setImportAuthModalOpen(false)}>Cancel</button>
             </div>
           </div>
         </div>

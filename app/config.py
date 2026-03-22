@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     )
 
     codex_cli_bin: str = "codex"
-    codex_switch_bin: str = "codex-switch"
     codex_auth_path: str = "/root/.codex/auth.json"
     callback_store_dir: str = "/root/.codex-switch/callbacks"
     codex_profiles_dir: str = "/root/.codex-switch/profiles"

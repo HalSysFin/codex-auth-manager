@@ -12,6 +12,7 @@ from app.account_usage_store import (
     _CompatConnection,
     _ensure_schema_sqlite,
     ensure_account,
+    get_active_profile_label,
     get_account,
     get_saved_profile,
     initialize_usage_store,
@@ -23,6 +24,7 @@ from app.account_usage_store import (
 )
 from app.codex_switch import switch_label
 from app.config import settings
+from app.main import _persist_active_auth_db_copy
 
 
 class ProfileDbMigrationTests(unittest.TestCase):
@@ -65,12 +67,14 @@ class ProfileDbMigrationTests(unittest.TestCase):
             with (
                 patch.object(settings, "usage_db_path", str(db_path)),
                 patch.object(settings, "codex_auth_path", str(auth_path)),
+                patch("app.account_usage_store._is_postgres_configured", return_value=False),
             ):
                 result = switch_label("max")
 
             self.assertEqual(result.returncode, 0)
             payload = json.loads(auth_path.read_text())
             self.assertEqual(payload["tokens"]["access_token"], "tok-max")
+            self.assertEqual(get_active_profile_label(db_path=db_path), "max")
 
     def test_migrate_legacy_sqlite_and_json_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +124,34 @@ class ProfileDbMigrationTests(unittest.TestCase):
             self.assertIsNotNone(profile)
             account = get_account("acct:james", db_path=dest_db)
             self.assertIsNotNone(account)
+
+    def test_active_auth_change_is_persisted_back_to_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "usage.sqlite3"
+            auth_path = Path(tmp) / "auth.json"
+            initialize_usage_store(db_path)
+            upsert_saved_profile(
+                label="james",
+                account_key="acct:james",
+                auth_json={"tokens": {"access_token": "old-token"}, "email": "james@example.com"},
+                email="james@example.com",
+                db_path=db_path,
+            )
+            auth_path.write_text(json.dumps({"tokens": {"access_token": "new-token"}, "email": "james@example.com"}))
+
+            with (
+                patch.object(settings, "usage_db_path", str(db_path)),
+                patch.object(settings, "codex_auth_path", str(auth_path)),
+                patch("app.account_usage_store._is_postgres_configured", return_value=False),
+            ):
+                changed = _persist_active_auth_db_copy("james")
+
+            self.assertTrue(changed)
+            saved = get_saved_profile("james", db_path=db_path)
+            self.assertIsNotNone(saved)
+            assert saved is not None
+            self.assertEqual(saved["auth_json"]["tokens"]["access_token"], "new-token")
+            self.assertIsNotNone(saved.get("auth_updated_at"))
 
 
 if __name__ == "__main__":

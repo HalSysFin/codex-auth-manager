@@ -9,7 +9,7 @@ RUN npm run build
 FROM python:3.11-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG CODEX_INSTALL_CMD="npm install -g @openai/codex codex-switch"
+ARG CODEX_INSTALL_CMD="npm install -g @openai/codex"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl nodejs npm \
@@ -20,14 +20,13 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Assumes codex CLI and codex-switch are available as npm packages.
+# Assumes Codex CLI is available as an npm package.
 RUN sh -c "$CODEX_INSTALL_CMD"
 
 COPY . .
 COPY --from=frontend-build /frontend/dist ./frontend/dist
 
 ENV CODEX_CLI_BIN=codex \
-    CODEX_SWITCH_BIN=codex-switch \
     CODEX_AUTH_PATH=/root/.codex/auth.json \
     CALLBACK_STORE_DIR=/root/.codex-switch/callbacks \
     CODEX_PROFILES_DIR=/root/.codex-switch/profiles \

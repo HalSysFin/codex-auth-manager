@@ -17,7 +17,6 @@ services:
       - "8080:8080"
     environment:
       CODEX_CLI_BIN: ${CODEX_CLI_BIN:-codex}
-      CODEX_SWITCH_BIN: ${CODEX_SWITCH_BIN:-cxs}
       CODEX_AUTH_PATH: ${CODEX_AUTH_PATH:-/root/.codex/auth.json}
       CALLBACK_STORE_DIR: ${CALLBACK_STORE_DIR:-/root/.codex-switch/callbacks}
       CODEX_PROFILES_DIR: ${CODEX_PROFILES_DIR:-/root/.codex-switch/profiles}

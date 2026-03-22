@@ -50,6 +50,7 @@ from .account_usage_store import (
     set_active_profile_label,
     sync_account_rate_limit_percentages,
     sync_account_usage_snapshot,
+    touch_profile_last_used,
     upsert_saved_profile,
 )
 from .auth_store import (
@@ -276,7 +277,7 @@ async def oauth_callback_post(request: Request, payload: dict[str, Any]) -> JSON
             {
                 "stored_at": str(stored_at),
                 "saved_label": str(label),
-                "message": "Auth saved and codex-switch profile updated.",
+                "message": "Auth saved and profile updated in DB.",
             }
         )
 
@@ -687,6 +688,8 @@ async def auth_switch(request: Request, payload: dict[str, Any]) -> JSONResponse
         now_current = _resolve_current_label(read_current_auth(), list_profiles())
         if profile is not None:
             _touch_account_usage(profile=profile)
+            with suppress(Exception):
+                _persist_active_auth_db_copy(profile.label)
     except CodexSwitchError as exc:
         raise _to_switch_http_error(exc) from exc
     except CodexCLIError:
@@ -880,6 +883,9 @@ async def auth_rate_limits(request: Request) -> JSONResponse:
                 name=_account_name(result.account, current_email),
                 now=datetime.now(timezone.utc),
             )
+            if current_profile is not None:
+                with suppress(Exception):
+                    _persist_active_auth_db_copy(current_profile.label)
     except CodexCLIError:
         current_label = None
 
@@ -1490,6 +1496,16 @@ async def api_public_stats() -> JSONResponse:
     )
 
 
+@app.get("/api/session/status")
+async def api_session_status(request: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "web_login_enabled": _web_login_enabled(),
+            "session_valid": _has_valid_web_session(request),
+        }
+    )
+
+
 @app.get("/internal/auths")
 async def internal_auths(request: Request, label: str | None = None) -> JSONResponse:
     _require_internal_auth(request)
@@ -2018,12 +2034,15 @@ def _fetch_session_limits_for_profiles(
     if not profiles:
         return out
 
+    baseline_label = get_active_profile_label()
     try:
         for profile in profiles:
             try:
                 switch_label(profile.label)
                 result = read_rate_limits_via_app_server()
                 out[profile.label] = _normalize_session_limit_payload(result.rate_limits)
+                with suppress(Exception):
+                    _persist_active_auth_db_copy(profile.label)
             except (CodexSwitchError, CodexCLIError) as exc:
                 out[profile.label] = {"error": str(exc)}
     finally:
@@ -2032,6 +2051,9 @@ def _fetch_session_limits_for_profiles(
                 persist_current_auth(baseline_auth)
             except AuthStoreError:
                 pass
+        if baseline_label:
+            with suppress(Exception):
+                set_active_profile_label(baseline_label)
 
     return out
 
@@ -2307,12 +2329,26 @@ def _persist_current_auth_to_profile(
     existing = set(list_labels())
     profiles = _dedupe_profiles(list_profiles())
     matched_profile = _find_matching_profile(profiles, resolved_auth, identity)
+    incoming_key = (identity.account_key or "").strip()
+    incoming_email = (email or "").strip().lower()
+    preferred_profile = _find_preferred_placeholder_profile(profiles, incoming_email)
 
     if desired_label is not None:
         label = desired_label.strip()
         if not label:
             raise ValueError("label cannot be empty")
         created_new_profile = matched_profile is None
+    elif (
+        matched_profile is not None
+        and incoming_key
+        and matched_profile.account_key == incoming_key
+        and preferred_profile is not None
+        and preferred_profile.label != matched_profile.label
+    ):
+        # If a placeholder profile already exists for the user's obvious label (e.g. email local-part),
+        # prefer replacing that placeholder label with the real reauth payload.
+        label = preferred_profile.label
+        created_new_profile = False
     elif matched_profile is not None:
         label = matched_profile.label
         created_new_profile = False
@@ -2353,7 +2389,7 @@ def _persist_current_auth_to_profile(
     switch_save = save_current_auth_under_label(label)
     profile_for_usage = matched_profile or AccountProfile(
         label=label,
-        path=settings.profiles_dir() / f"{label}.json",
+        path=settings.codex_auth_file(),
         auth=resolved_auth,
         account_key=identity.account_key,
         subject=identity.subject,
@@ -2382,6 +2418,39 @@ def _persist_current_auth_to_profile(
     )
 
 
+def _persist_active_auth_db_copy(label: str) -> bool:
+    clean = (label or "").strip()
+    if not clean:
+        return False
+    profile = get_saved_profile(clean)
+    if profile is None:
+        return False
+    try:
+        active_auth = read_current_auth()
+    except CodexCLIError:
+        return False
+    if not isinstance(active_auth, dict):
+        return False
+
+    stored_auth = profile.get("auth_json") if isinstance(profile.get("auth_json"), dict) else {}
+    auth_changed = stored_auth != active_auth
+    identity = extract_account_identity(active_auth)
+
+    if auth_changed:
+        upsert_saved_profile(
+            label=clean,
+            account_key=identity.account_key or str(profile.get("account_key") or clean),
+            auth_json=active_auth,
+            email=identity.email or profile.get("email"),
+            name=identity.name or profile.get("name"),
+            subject=identity.subject or profile.get("subject"),
+            user_id=identity.user_id or profile.get("user_id"),
+            provider_account_id=identity.account_id or profile.get("provider_account_id"),
+        )
+    touch_profile_last_used(clean)
+    return auth_changed
+
+
 def _find_matching_profile(
     profiles: list[AccountProfile],
     auth_json: dict[str, Any],
@@ -2399,6 +2468,35 @@ def _find_matching_profile(
         if incoming_token and profile.access_token and incoming_token == profile.access_token:
             return profile
     return None
+
+
+def _find_preferred_placeholder_profile(
+    profiles: list[AccountProfile], incoming_email: str
+) -> AccountProfile | None:
+    if not incoming_email or "@" not in incoming_email:
+        return None
+    local = incoming_email.split("@", 1)[0].strip().lower()
+    if not local:
+        return None
+    for profile in profiles:
+        if (profile.label or "").strip().lower() != local:
+            continue
+        if _is_placeholder_profile(profile):
+            return profile
+    return None
+
+
+def _is_placeholder_profile(profile: AccountProfile) -> bool:
+    email = (profile.email or "").strip().lower()
+    account_key = (profile.account_key or "").strip().lower()
+    token = (profile.access_token or "").strip()
+    if email.endswith("@example.com"):
+        return True
+    if account_key.startswith("email:"):
+        return True
+    if token and "." not in token:
+        return True
+    return False
 
 
 def _dedupe_profiles(profiles: list[AccountProfile]) -> list[AccountProfile]:

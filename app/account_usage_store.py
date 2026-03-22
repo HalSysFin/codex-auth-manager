@@ -844,13 +844,34 @@ def upsert_saved_profile(
     auth_payload = json.dumps(auth_json, sort_keys=True)
     with _connect(db_path) as conn:
         _ensure_schema(conn)
-        if _is_postgres_configured():
+        # Keep a single canonical row per concrete account identity.
+        # This avoids stale duplicate labels representing the same user.
+        if clean_account_key and clean_account_key != "unknown":
+            conn.execute(
+                "DELETE FROM saved_profiles WHERE account_key = ? AND label <> ?",
+                (clean_account_key, clean_label),
+            )
+        existing = conn.execute("SELECT auth_json FROM saved_profiles WHERE label = ?", (clean_label,)).fetchone()
+        auth_updated_at = now_iso
+        if existing:
+            prev_raw = existing["auth_json"] if isinstance(existing, dict) else existing[0]
+            prev_payload = None
+            if isinstance(prev_raw, (dict, list)):
+                prev_payload = json.dumps(prev_raw, sort_keys=True)
+            else:
+                prev_payload = str(prev_raw or "")
+            if prev_payload == auth_payload:
+                prev_ts_row = conn.execute("SELECT auth_updated_at FROM saved_profiles WHERE label = ?", (clean_label,)).fetchone()
+                prev_ts = prev_ts_row["auth_updated_at"] if isinstance(prev_ts_row, dict) else (prev_ts_row[0] if prev_ts_row else None)
+                auth_updated_at = str(prev_ts) if prev_ts else now_iso
+        is_pg = getattr(conn, "_kind", "sqlite") == "postgres"
+        if is_pg:
             conn.execute(
                 """
                 INSERT INTO saved_profiles (
                     label, account_key, email, name, subject, user_id, provider_account_id,
-                    auth_json, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                    auth_json, created_at, updated_at, auth_updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
                 ON CONFLICT (label) DO UPDATE
                 SET account_key = EXCLUDED.account_key,
                     email = EXCLUDED.email,
@@ -859,7 +880,8 @@ def upsert_saved_profile(
                     user_id = EXCLUDED.user_id,
                     provider_account_id = EXCLUDED.provider_account_id,
                     auth_json = EXCLUDED.auth_json,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    auth_updated_at = EXCLUDED.auth_updated_at
                 """,
                 (
                     clean_label,
@@ -872,6 +894,7 @@ def upsert_saved_profile(
                     auth_payload,
                     now_iso,
                     now_iso,
+                    auth_updated_at,
                 ),
             )
         else:
@@ -879,8 +902,8 @@ def upsert_saved_profile(
                 """
                 INSERT INTO saved_profiles (
                     label, account_key, email, name, subject, user_id, provider_account_id,
-                    auth_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    auth_json, created_at, updated_at, auth_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(label) DO UPDATE SET
                     account_key = excluded.account_key,
                     email = excluded.email,
@@ -889,7 +912,8 @@ def upsert_saved_profile(
                     user_id = excluded.user_id,
                     provider_account_id = excluded.provider_account_id,
                     auth_json = excluded.auth_json,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    auth_updated_at = excluded.auth_updated_at
                 """,
                 (
                     clean_label,
@@ -902,6 +926,7 @@ def upsert_saved_profile(
                     auth_payload,
                     now_iso,
                     now_iso,
+                    auth_updated_at,
                 ),
             )
 
@@ -1202,8 +1227,9 @@ def _row_to_saved_profile(row: Any) -> dict[str, Any]:
         "auth_json": auth_obj if isinstance(auth_obj, dict) else {},
         "created_at": row["created_at"] if isinstance(row, dict) else row[8],
         "updated_at": row["updated_at"] if isinstance(row, dict) else row[9],
-        "last_used_at": row["last_used_at"] if isinstance(row, dict) else row[10],
-        "switched_at": row["switched_at"] if isinstance(row, dict) else row[11],
+        "auth_updated_at": row.get("auth_updated_at") if isinstance(row, dict) else (row[10] if len(row) > 10 else None),
+        "last_used_at": row.get("last_used_at") if isinstance(row, dict) else (row[11] if len(row) > 11 else None),
+        "switched_at": row.get("switched_at") if isinstance(row, dict) else (row[12] if len(row) > 12 else None),
     }
 
 
@@ -1286,7 +1312,7 @@ def _refresh_account_window_if_needed_locked(
 
 
 def _connect(db_path: Path | None) -> _CompatConnection:
-    if _is_postgres_configured():
+    if db_path is None and _is_postgres_configured():
         if psycopg is None:
             raise RuntimeError("DATABASE_URL is configured for Postgres but psycopg is not installed")
         conn = psycopg.connect(_db_url(), autocommit=True, row_factory=dict_row)
@@ -1301,7 +1327,8 @@ def _connect(db_path: Path | None) -> _CompatConnection:
 
 
 def _ensure_schema(conn: Any) -> None:
-    if _is_postgres_configured():
+    conn_kind = getattr(conn, "_kind", None)
+    if conn_kind == "postgres":
         _ensure_schema_postgres(conn)
         return
     _ensure_schema_sqlite(conn)
@@ -1343,6 +1370,7 @@ def _ensure_schema_postgres(conn: Any) -> None:
             auth_json JSONB NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            auth_updated_at TEXT NULL,
             last_used_at TEXT NULL,
             switched_at TEXT NULL
         )
@@ -1437,6 +1465,7 @@ def _ensure_schema_postgres(conn: Any) -> None:
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS lifetime_used BIGINT NOT NULL DEFAULT 0")
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS auth_updated_at TEXT NULL")
 
     now_iso = _to_iso(datetime.now(timezone.utc))
     conn.execute(
@@ -1584,6 +1613,7 @@ def _ensure_schema_sqlite(conn: Any) -> None:
             auth_json TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            auth_updated_at TEXT NULL,
             last_used_at TEXT NULL,
             switched_at TEXT NULL
         )
@@ -1591,6 +1621,9 @@ def _ensure_schema_sqlite(conn: Any) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_profiles_account_key ON saved_profiles(account_key)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_saved_profiles_email ON saved_profiles(email)")
+    cols_saved = {str(row["name"]) for row in conn.execute("PRAGMA table_info(saved_profiles)").fetchall()}
+    if "auth_updated_at" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN auth_updated_at TEXT NULL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS app_meta (

@@ -48,57 +48,28 @@ def list_profiles() -> list[AccountProfile]:
         db_rows = list_saved_profiles()
     except Exception:
         db_rows = []
-
-    if db_rows:
-        for row in db_rows:
-            auth = row.get("auth_json") if isinstance(row.get("auth_json"), dict) else {}
-            identity = extract_account_identity(auth)
-            access_token = extract_access_token(auth)
-            profiles.append(
-                AccountProfile(
-                    label=str(row.get("label") or identity.email or "account"),
-                    path=settings.profiles_dir() / f"{str(row.get('label') or 'account')}.json",
-                    auth=auth,
-                    account_key=str(row.get("account_key") or identity.account_key or "unknown"),
-                    subject=str(row.get("subject")) if row.get("subject") is not None else identity.subject,
-                    user_id=str(row.get("user_id")) if row.get("user_id") is not None else identity.user_id,
-                    provider_account_id=(
-                        str(row.get("provider_account_id"))
-                        if row.get("provider_account_id") is not None
-                        else identity.account_id
-                    ),
-                    name=str(row.get("name")) if row.get("name") is not None else identity.name,
-                    access_token=access_token,
-                    email=str(row.get("email")) if row.get("email") is not None else identity.email,
-                )
+    for row in db_rows:
+        auth = row.get("auth_json") if isinstance(row.get("auth_json"), dict) else {}
+        identity = extract_account_identity(auth)
+        access_token = extract_access_token(auth)
+        profiles.append(
+            AccountProfile(
+                label=str(row.get("label") or identity.email or "account"),
+                path=settings.codex_auth_file(),
+                auth=auth,
+                account_key=str(row.get("account_key") or identity.account_key or "unknown"),
+                subject=str(row.get("subject")) if row.get("subject") is not None else identity.subject,
+                user_id=str(row.get("user_id")) if row.get("user_id") is not None else identity.user_id,
+                provider_account_id=(
+                    str(row.get("provider_account_id"))
+                    if row.get("provider_account_id") is not None
+                    else identity.account_id
+                ),
+                name=str(row.get("name")) if row.get("name") is not None else identity.name,
+                access_token=access_token,
+                email=str(row.get("email")) if row.get("email") is not None else identity.email,
             )
-    else:
-        # Legacy fallback for pre-migration local profile files.
-        profiles_dir = settings.profiles_dir()
-        if profiles_dir.exists():
-            for path in sorted(profiles_dir.iterdir()):
-                if not path.is_file():
-                    continue
-                auth = _load_json(path)
-                if not isinstance(auth, dict):
-                    continue
-                label = path.stem
-                identity = extract_account_identity(auth)
-                access_token = extract_access_token(auth)
-                profiles.append(
-                    AccountProfile(
-                        label=label,
-                        path=path,
-                        auth=auth,
-                        account_key=identity.account_key,
-                        subject=identity.subject,
-                        user_id=identity.user_id,
-                        provider_account_id=identity.account_id,
-                        name=identity.name,
-                        access_token=access_token,
-                        email=identity.email,
-                    )
-                )
+        )
 
     account_keys = sorted({profile.account_key for profile in profiles if profile.account_key})
     usage_by_id: dict[str, Any] = {}
