@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import { AuthManagerClient } from '../authManagerClient.ts'
 import { prepareAuthPayloadForWrite, validateAuthPayload } from '../authPayload.ts'
+import { AuthManagerClientError } from '../authManagerClient.ts'
 
 test('acquire plus materialize returns a writable auth payload', async () => {
   const seenPaths: string[] = []
@@ -142,4 +143,141 @@ test('telemetry post preserves truthful null counters when client has no token d
   assert.equal(postedBody?.tokens_in, null)
   assert.equal(postedBody?.tokens_out, null)
   assert.equal(postedBody?.utilization_pct, 42)
+})
+
+test('rotate plus materialize returns the replacement auth payload', async () => {
+  const client = new AuthManagerClient({
+    baseUrl: 'http://127.0.0.1:8080',
+    internalApiToken: 'secret-token',
+    allowInsecureLocalhost: true,
+    fetchImpl: async (input) => {
+      const url = String(input)
+      if (url.endsWith('/api/leases/rotate')) {
+        return new Response(JSON.stringify({
+          status: 'ok',
+          reason: null,
+          lease: {
+            id: 'lease-2',
+            credential_id: 'cred-2',
+            machine_id: 'machine-a',
+            agent_id: 'agent-a',
+            state: 'active',
+            issued_at: '2026-03-23T00:00:00.000Z',
+            expires_at: '2026-03-23T01:00:00.000Z',
+            renewed_at: null,
+            revoked_at: null,
+            released_at: null,
+            rotation_reason: 'approaching_utilization_threshold',
+            replacement_lease_id: null,
+            last_telemetry_at: null,
+            latest_utilization_pct: 5,
+            latest_quota_remaining: 995,
+            last_success_at: null,
+            last_error_at: null,
+            reason: null,
+            metadata: null,
+            created_at: '2026-03-23T00:00:00.000Z',
+            updated_at: '2026-03-23T00:00:00.000Z',
+          },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        status: 'ok',
+        reason: null,
+        lease: {
+          id: 'lease-2',
+          credential_id: 'cred-2',
+          machine_id: 'machine-a',
+          agent_id: 'agent-a',
+          state: 'active',
+          issued_at: '2026-03-23T00:00:00.000Z',
+          expires_at: '2026-03-23T01:00:00.000Z',
+          renewed_at: null,
+          revoked_at: null,
+          released_at: null,
+          rotation_reason: 'approaching_utilization_threshold',
+          replacement_lease_id: null,
+          last_telemetry_at: null,
+          latest_utilization_pct: 5,
+          latest_quota_remaining: 995,
+          last_success_at: null,
+          last_error_at: null,
+          reason: null,
+          metadata: null,
+          created_at: '2026-03-23T00:00:00.000Z',
+          updated_at: '2026-03-23T00:00:00.000Z',
+        },
+        credential_material: {
+          auth_json: {
+            auth_mode: 'chatgpt',
+            OPENAI_API_KEY: null,
+            tokens: {
+              id_token: 'id-token-2',
+              access_token: 'access-token-2',
+              refresh_token: 'refresh-token-2',
+              account_id: 'acct-2',
+            },
+          },
+        },
+      }), { status: 200 })
+    },
+  })
+
+  const rotated = await client.rotateLease({
+    leaseId: 'lease-1',
+    machineId: 'machine-a',
+    agentId: 'agent-a',
+    reason: 'approaching_utilization_threshold',
+  })
+  const materialized = await client.materializeLease(rotated.lease!.id, {
+    machineId: 'machine-a',
+    agentId: 'agent-a',
+  })
+
+  assert.equal(rotated.lease?.id, 'lease-2')
+  assert.equal(materialized.credential_material?.auth_json?.tokens.account_id, 'acct-2')
+})
+
+test('backend denial preserves no eligible credentials reason', async () => {
+  const client = new AuthManagerClient({
+    baseUrl: 'http://127.0.0.1:8080',
+    internalApiToken: 'secret-token',
+    allowInsecureLocalhost: true,
+    fetchImpl: async () =>
+      new Response(
+        JSON.stringify({
+          reason: 'no_eligible_credentials_available',
+        }),
+        { status: 409 },
+      ),
+  })
+
+  await assert.rejects(
+    () =>
+      client.acquireLease({
+        machineId: 'machine-a',
+        agentId: 'agent-a',
+      }),
+    (error: unknown) =>
+      error instanceof AuthManagerClientError &&
+      error.status === 409 &&
+      error.code === 'no_eligible_credentials_available',
+  )
+})
+
+test('backend unavailable errors surface without fake success payloads', async () => {
+  const client = new AuthManagerClient({
+    baseUrl: 'http://127.0.0.1:8080',
+    internalApiToken: 'secret-token',
+    allowInsecureLocalhost: true,
+    fetchImpl: async () => {
+      throw new Error('connect ECONNREFUSED')
+    },
+  })
+
+  await assert.rejects(
+    () =>
+      client.getLease('lease-1'),
+    /ECONNREFUSED/,
+  )
 })

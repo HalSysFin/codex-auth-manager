@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { formatStatusLines } from '../output.js'
 import { buildLeaseTelemetryPayload } from '../../../packages/lease-runtime/src/telemetry.js'
-import { selectStartupAction } from '../../../packages/lease-runtime/src/leaseLifecycle.js'
+import { deriveLeaseHealthState, selectStartupAction } from '../../../packages/lease-runtime/src/leaseLifecycle.js'
+import { healthParityCases, startupParityCases } from '../../../packages/lease-runtime/src/test/parityMatrix.ts'
 
 test('formatStatusLines renders readable status output', () => {
   const lines = formatStatusLines({
@@ -113,4 +114,30 @@ test('buildLeaseTelemetryPayload stays truthful', () => {
   }, '2026-03-23T00:05:00.000Z')
   assert.equal(payload.utilization_pct, 50)
   assert.equal(payload.requests_count, null)
+})
+
+test('headless client matches the shared startup parity matrix', () => {
+  for (const scenario of startupParityCases) {
+    assert.equal(
+      selectStartupAction({
+        leaseId: scenario.leaseId,
+        autoRotate: true,
+        autoRenew: true,
+        leaseStatus: scenario.leaseStatus,
+        now: new Date('2026-03-23T00:00:00.000Z'),
+      }),
+      scenario.expectedAction,
+      scenario.name,
+    )
+  }
+})
+
+test('headless client matches the shared health parity matrix', () => {
+  for (const scenario of healthParityCases) {
+    assert.equal(
+      deriveLeaseHealthState(scenario.leaseStatus, new Date('2026-03-23T00:00:00.000Z')),
+      scenario.expectedHealth,
+      scenario.name,
+    )
+  }
 })

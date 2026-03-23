@@ -12,30 +12,35 @@ The current suite exercises the canonical lease lifecycle paths:
 - revoked and expired lease handling
 - `replacement_required` rotation behavior
 - near-expiry renew behavior
+- no eligible credentials denial handling
+- backend unavailable degraded-state handling
 - exhaustion-driven lease invalidation on the backend
 - weekly reset confirmation behavior
 - telemetry round-trip and latest-summary updates
 - OpenClaw usage normalization and telemetry flushing
+- auth-file rewrite after reacquire or rotate in the headless client
 
 ## Coverage By Surface
 
 - `tests/test_lease_broker_store.py`
-  Backend broker/store integration against a temporary SQLite test DB. This covers acquire, materialize, renew, rotate, revoke/exhaust, release, ownership validation, telemetry summary updates, and weekly reset confirmation behavior.
+  Backend broker/store integration against a temporary SQLite test DB. This covers acquire, materialize, renew, rotate, revoke/exhaust, `replacement_required`, release, ownership validation, telemetry summary updates, and weekly reset confirmation behavior.
+- `tests/test_cached_accounts_api.py`
+  Backend API-level integration coverage for lease materialization and telemetry responses. This verifies that the FastAPI lease endpoints return `credential_material.auth_json` and expose updated lease summary fields after telemetry ingestion.
 - `packages/lease-runtime/src/test/*.test.ts`
-  Shared lifecycle parity tests for acquire/reacquire/rotate/renew/noop decisions, auth materialization contract handling, and truthful telemetry shaping.
+  Shared lifecycle parity tests for acquire/reacquire/rotate/renew/noop decisions, no-eligible/backend-unavailable error handling, auth materialization contract handling, and truthful telemetry shaping.
 - `vscode-extension/src/test/*.test.ts`
-  VS Code runtime/helper tests that verify shared lifecycle parity, auth payload validation, and persisted lease metadata behavior.
+  VS Code runtime/helper tests that verify the shared startup and health parity matrix, auth payload validation, auth-file writes, and persisted lease metadata behavior.
 - `desktop-app/src/test/*.test.ts`
-  Desktop runtime tests for shared startup actions, auth payload handling, and persisted state.
+  Desktop runtime tests for the shared startup and health parity matrix, auth payload handling, and persisted state.
 - `headless-client/src/test/*.test.ts`
-  Headless runtime tests for status rendering, shared startup actions, and auth file helpers.
+  Headless runtime tests for status rendering, shared startup parity, auth file helpers, and end-to-end temp-file flows for acquire/materialize, revoked->reacquire rewrite, denied acquire, and backend-unavailable behavior.
 - `openclaw-plugin/src/test/*.test.ts`
-  OpenClaw usage normalization, telemetry posting, request-threshold flushing, and lease-context update behavior.
+  OpenClaw usage normalization, telemetry posting, request-threshold flushing, stop-time flush behavior, and lease-context update behavior.
 
 ## What Remains Mocked
 
 - GUI event loops and full VS Code/Tauri host integration are still covered through runtime/helper tests instead of full UI harnesses.
-- OpenClaw runtime hook-up is still outside this repo. The plugin tests prove normalization and posting behavior, but the final live hook into OpenClaw’s response lifecycle must still be applied in the OpenClaw runtime itself.
+- Real OpenClaw runtime hook-up is still outside this repo. The plugin tests here prove the in-repo entry/service/flush behavior, but they do not pretend to execute the external OpenClaw runtime lifecycle.
 - Backend API round-trips for TypeScript clients are covered with mocked fetch implementations rather than a live HTTP server.
 
 ## Running The Suite

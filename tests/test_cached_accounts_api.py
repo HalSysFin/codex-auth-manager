@@ -7,7 +7,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.accounts import AccountProfile
-from app.main import api_account_history, api_accounts, api_accounts_stream, api_usage_history
+from app.main import (
+    api_account_history,
+    api_accounts,
+    api_accounts_stream,
+    api_lease_materialize,
+    api_lease_telemetry,
+    api_usage_history,
+)
 
 
 def _json_body(response) -> dict:
@@ -146,6 +153,90 @@ class CachedAccountsApiTests(unittest.TestCase):
         self.assertIn('completed_windows', payload)
         self.assertEqual(payload['current_state']['usage_in_window'], 20)
         self.assertEqual(len(payload['completed_windows']), 1)
+
+    def test_lease_materialize_returns_credential_material_auth_json(self) -> None:
+        with (
+            patch('app.main._require_internal_auth', return_value=None),
+            patch('app.main.materialize_broker_lease', return_value={
+                'status': 'ok',
+                'reason': None,
+                'lease': {
+                    'id': 'lease-1',
+                    'credential_id': 'acct:max',
+                    'metadata': {'label': 'max'},
+                },
+            }),
+            patch('app.main._leased_profile_payload_for_credential', return_value={
+                'label': 'max',
+                'account_key': 'acct:max',
+                'email': 'max@example.com',
+                'name': 'Max',
+                'provider_account_id': 'provider-max',
+                'auth_json': {
+                    'auth_mode': 'chatgpt',
+                    'OPENAI_API_KEY': None,
+                    'tokens': {
+                        'id_token': 'id-token',
+                        'access_token': 'access-token',
+                        'refresh_token': 'refresh-token',
+                        'account_id': 'acct-max',
+                    },
+                },
+            }),
+            patch('app.main._audit_broker_event', return_value=None),
+        ):
+            response = asyncio.run(api_lease_materialize(
+                request=None,
+                lease_id='lease-1',
+                payload={'machine_id': 'machine-a', 'agent_id': 'agent-a'},
+            ))
+
+        payload = _json_body(response)
+        self.assertEqual(payload['status'], 'ok')
+        self.assertEqual(payload['credential_material']['label'], 'max')
+        self.assertEqual(payload['credential_material']['auth_json']['tokens']['account_id'], 'acct-max')
+
+    def test_lease_telemetry_returns_updated_latest_summary(self) -> None:
+        with (
+            patch('app.main._require_internal_auth', return_value=None),
+            patch('app.main.record_broker_lease_telemetry', return_value={
+                'status': 'ok',
+                'reason': None,
+                'lease': {
+                    'id': 'lease-1',
+                    'credential_id': 'acct:max',
+                    'state': 'active',
+                    'latest_utilization_pct': 84.0,
+                    'latest_quota_remaining': 16000,
+                    'reason': None,
+                },
+                'credential': {
+                    'id': 'acct:max',
+                    'state': 'leased',
+                },
+            }),
+            patch('app.main._audit_broker_event', return_value=None),
+        ):
+            response = asyncio.run(api_lease_telemetry(
+                request=None,
+                lease_id='lease-1',
+                payload={
+                    'machine_id': 'machine-a',
+                    'agent_id': 'agent-a',
+                    'captured_at': '2026-03-23T10:00:00+00:00',
+                    'requests_count': 2,
+                    'tokens_in': 100,
+                    'tokens_out': 50,
+                    'status': 'ok',
+                    'utilization_pct': 84.0,
+                    'quota_remaining': 16000,
+                },
+            ))
+
+        payload = _json_body(response)
+        self.assertEqual(payload['status'], 'ok')
+        self.assertEqual(payload['lease']['latest_utilization_pct'], 84.0)
+        self.assertEqual(payload['lease']['latest_quota_remaining'], 16000)
 
 
 if __name__ == '__main__':

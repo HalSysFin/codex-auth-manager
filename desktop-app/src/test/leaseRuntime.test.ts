@@ -2,6 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { selectStartupAction } from '../../../packages/lease-runtime/src/leaseLifecycle.ts'
 import { buildLeaseTelemetryPayload } from '../../../packages/lease-runtime/src/telemetry.ts'
+import { healthParityCases, startupParityCases } from '../../../packages/lease-runtime/src/test/parityMatrix.ts'
+import { deriveLeaseHealthState } from '../../../packages/lease-runtime/src/leaseLifecycle.ts'
 
 test('startup with no lease acquires', () => {
   assert.equal(selectStartupAction({
@@ -156,4 +158,30 @@ test('minimal telemetry payload stays truthful', () => {
     rate_limit_remaining: null,
     error_rate_1h: null,
   })
+})
+
+test('desktop app matches the shared startup parity matrix', () => {
+  for (const scenario of startupParityCases) {
+    assert.equal(
+      selectStartupAction({
+        leaseId: scenario.leaseId,
+        leaseStatus: scenario.leaseStatus,
+        autoRotate: true,
+        autoRenew: true,
+        now: new Date('2026-03-23T00:00:00.000Z'),
+      }),
+      scenario.expectedAction,
+      scenario.name,
+    )
+  }
+})
+
+test('desktop app matches the shared health parity matrix', () => {
+  for (const scenario of healthParityCases) {
+    assert.equal(
+      deriveLeaseHealthState(scenario.leaseStatus, new Date('2026-03-23T00:00:00.000Z')),
+      scenario.expectedHealth,
+      scenario.name,
+    )
+  }
 })

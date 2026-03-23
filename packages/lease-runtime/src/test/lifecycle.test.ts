@@ -7,6 +7,7 @@ import {
   shouldReacquireAfterLookupError,
 } from '../leaseLifecycle.ts'
 import type { LeaseStatusResponse } from '../types.ts'
+import { deniedReason, healthParityCases, startupParityCases } from './parityMatrix.ts'
 
 function buildLeaseStatus(overrides: Partial<LeaseStatusResponse> = {}): LeaseStatusResponse {
   return {
@@ -112,4 +113,34 @@ test('health state reports expiring for near-expiry active leases', () => {
   assert.equal(deriveLeaseHealthState(buildLeaseStatus({
     expires_at: '2026-03-23T00:04:00.000Z',
   }), new Date('2026-03-23T00:00:00.000Z')), 'expiring')
+})
+
+test('shared startup parity cases stay aligned', () => {
+  for (const scenario of startupParityCases) {
+    assert.equal(
+      selectStartupAction({
+        leaseId: scenario.leaseId,
+        leaseStatus: scenario.leaseStatus,
+        autoRotate: true,
+        autoRenew: true,
+        now: new Date('2026-03-23T00:00:00.000Z'),
+      }),
+      scenario.expectedAction,
+      scenario.name,
+    )
+  }
+})
+
+test('shared health parity cases stay aligned', () => {
+  for (const scenario of healthParityCases) {
+    assert.equal(
+      deriveLeaseHealthState(scenario.leaseStatus, new Date('2026-03-23T00:00:00.000Z')),
+      scenario.expectedHealth,
+      scenario.name,
+    )
+  }
+})
+
+test('denied lease reason constant documents the shared no-eligible path', () => {
+  assert.equal(deniedReason, 'no_eligible_credentials_available')
 })

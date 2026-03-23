@@ -71,3 +71,31 @@ test('changing lease context resets pending totals before the next flush', async
   assert.equal(leasePosts[0].body.tokens_in, 7)
   assert.equal(leasePosts[0].body.tokens_out, 3)
 })
+
+test('stop flushes outstanding telemetry once before shutting down', async () => {
+  const posts: Array<Record<string, unknown>> = []
+  const service = createOpenClawLeaseTelemetryService({
+    baseUrl: 'http://127.0.0.1:8080',
+    internalApiToken: 'secret',
+    context: {
+      leaseId: 'lease_1',
+      machineId: 'machine-a',
+      agentId: 'openclaw',
+    },
+    flushEveryRequests: 99,
+    fetchImpl: async (_input, init) => {
+      posts.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+      return new Response(JSON.stringify({ status: 'ok' }), { status: 200 })
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  service.observeUsage({ usage: { prompt_tokens: 9, completion_tokens: 4, total_tokens: 13 } })
+  await service.flushNow()
+  service.stop()
+
+  assert.equal(posts.length, 1)
+  assert.equal(posts[0].requests_count, 1)
+  assert.equal(posts[0].tokens_in, 9)
+  assert.equal(posts[0].tokens_out, 4)
+})

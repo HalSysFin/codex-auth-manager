@@ -8,6 +8,7 @@ import {
   shouldRenewLease,
   shouldRotateLease,
 } from '../leaseLifecycle'
+import { healthParityCases, startupParityCases } from '../../../packages/lease-runtime/src/test/parityMatrix.ts'
 
 test('startup with no lease needs reacquire', () => {
   assert.equal(needsReacquire(null), true)
@@ -148,4 +149,30 @@ test('healthy active lease maps to shared startup noop action', () => {
 test('404 lease lookup stays on the shared reacquire path', () => {
   assert.equal(shouldReacquireAfterLookupError(404), true)
   assert.equal(shouldReacquireAfterLookupError(500), false)
+})
+
+test('vscode extension matches the shared startup parity matrix', () => {
+  for (const scenario of startupParityCases) {
+    assert.equal(
+      selectStartupAction({
+        leaseId: scenario.leaseId,
+        leaseStatus: scenario.leaseStatus,
+        autoRotate: true,
+        autoRenew: true,
+        now: new Date('2026-03-23T00:00:00.000Z'),
+      }),
+      scenario.expectedAction,
+      scenario.name,
+    )
+  }
+})
+
+test('vscode extension matches the shared health parity matrix', () => {
+  for (const scenario of healthParityCases) {
+    assert.equal(
+      deriveLeaseHealthState(scenario.leaseStatus, new Date('2026-03-23T00:00:00.000Z')),
+      scenario.expectedHealth,
+      scenario.name,
+    )
+  }
 })

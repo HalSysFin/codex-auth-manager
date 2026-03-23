@@ -193,6 +193,24 @@ class LeaseBrokerStoreTests(unittest.TestCase):
         self.assertEqual(result["status"], "denied")
         self.assertEqual(result["reason"], "no_eligible_credentials_available")
 
+    def test_rotate_never_returns_exhausted_or_over_threshold_credentials(self) -> None:
+        self._sync_credential("cred-a", health_score=95.0)
+        self._sync_credential("cred-b", utilization_pct=100.0, health_score=99.0)
+        self._sync_credential("cred-c", utilization_pct=99.0, health_score=98.0)
+        self._sync_credential("cred-d", utilization_pct=20.0, health_score=80.0)
+        lease = acquire_broker_lease(machine_id="m1", agent_id="a1", db_path=self.db_path)["lease"]
+
+        result = rotate_broker_lease(
+            lease_id=lease["id"],
+            machine_id="m1",
+            agent_id="a1",
+            reason="approaching_utilization_threshold",
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["lease"]["credential_id"], "cred-d")
+
     def test_above_threshold_credentials_are_not_assigned(self) -> None:
         self._sync_credential("cred-a", utilization_pct=99.0)
         self._sync_credential("cred-b", utilization_pct=94.0)
@@ -262,6 +280,33 @@ class LeaseBrokerStoreTests(unittest.TestCase):
         self.assertEqual(status["latest_utilization_pct"], 88.0)
         self.assertEqual(status["latest_quota_remaining"], 25000)
         self.assertEqual(status["credential_state"], "leased")
+
+    def test_high_utilization_telemetry_marks_replacement_required_before_exhaustion(self) -> None:
+        self._sync_credential("cred-a")
+        lease = acquire_broker_lease(machine_id="m1", agent_id="a1", db_path=self.db_path)["lease"]
+
+        result = record_broker_lease_telemetry(
+            lease_id=lease["id"],
+            machine_id="m1",
+            agent_id="a1",
+            captured_at="2026-03-22T13:00:00+00:00",
+            requests_count=5,
+            tokens_in=100,
+            tokens_out=50,
+            utilization_pct=95.0,
+            quota_remaining=5000,
+            rate_limit_remaining=10,
+            status="ok",
+            last_success_at="2026-03-22T13:00:00+00:00",
+            last_error_at=None,
+            error_rate_1h=0.0,
+            db_path=self.db_path,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["lease"]["state"], "rotation_required")
+        status = get_broker_lease_status(lease["id"], db_path=self.db_path)
+        self.assertTrue(status["replacement_required"])
 
     def test_release_transitions_lease_state_correctly(self) -> None:
         self._sync_credential("cred-a")
