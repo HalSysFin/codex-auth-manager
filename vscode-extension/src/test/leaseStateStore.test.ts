@@ -26,7 +26,7 @@ test('LeaseStateStore persists lease metadata', async () => {
   const store = new LeaseStateStore(new MemoryMemento())
   const machineId = await store.getOrCreateMachineId('machine-a')
   const agentId = await store.getOrCreateAgentId('agent-a')
-  let state = store.load(machineId, agentId)
+  let state = store.load(machineId, agentId, '~/.codex/auth.json')
   state = await store.updateFromLease(state, {
     id: 'lease-1',
     credential_id: 'cred-1',
@@ -53,5 +53,6 @@ test('LeaseStateStore persists lease metadata', async () => {
   assert.equal(state.leaseId, 'lease-1')
   assert.equal(state.credentialId, 'cred-1')
   assert.equal(state.latestUtilizationPct, 12)
+  assert.equal(state.authFilePath, '~/.codex/auth.json')
   assert.ok(state.lastBackendRefreshAt)
 })

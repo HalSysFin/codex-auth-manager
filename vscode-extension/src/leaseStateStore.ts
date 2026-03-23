@@ -1,53 +1,28 @@
 import { randomUUID } from 'node:crypto'
 import * as os from 'node:os'
 import type * as vscode from 'vscode'
-import type { Lease, LeaseStatusResponse } from './authManagerClient'
+import {
+  defaultRuntimeLeaseState,
+  recordAuthWrite as sharedRecordAuthWrite,
+  recordError as sharedRecordError,
+  updateRuntimeStateFromLease,
+  updateRuntimeStateFromLeaseStatus,
+} from '../../packages/lease-runtime/src/runtimeState.js'
+import type { Lease, LeaseStatusResponse, RuntimeLeaseState } from '../../packages/lease-runtime/src/types.js'
 
 const STATE_KEY = 'authManager.leaseState'
 const MACHINE_ID_KEY = 'authManager.machineId'
 const AGENT_ID_KEY = 'authManager.agentId'
 
-export interface LeaseState {
-  machineId: string
-  agentId: string
-  leaseId: string | null
-  credentialId: string | null
-  issuedAt: string | null
-  expiresAt: string | null
-  leaseState: string | null
-  latestTelemetryAt: string | null
-  latestUtilizationPct: number | null
-  latestQuotaRemaining: number | null
-  lastAuthWriteAt: string | null
-  lastBackendRefreshAt: string | null
-  replacementRequired: boolean
-  rotationRecommended: boolean
-  lastErrorAt: string | null
-}
+export type LeaseState = RuntimeLeaseState
 
 export interface MementoLike {
   get<T>(key: string, defaultValue?: T): T | undefined
   update(key: string, value: unknown): Thenable<void>
 }
 
-export function defaultLeaseState(machineId: string, agentId: string): LeaseState {
-  return {
-    machineId,
-    agentId,
-    leaseId: null,
-    credentialId: null,
-    issuedAt: null,
-    expiresAt: null,
-    leaseState: null,
-    latestTelemetryAt: null,
-    latestUtilizationPct: null,
-    latestQuotaRemaining: null,
-    lastAuthWriteAt: null,
-    lastBackendRefreshAt: null,
-    replacementRequired: false,
-    rotationRecommended: false,
-    lastErrorAt: null,
-  }
+export function defaultLeaseState(machineId: string, agentId: string, authFilePath = '~/.codex/auth.json'): LeaseState {
+  return defaultRuntimeLeaseState(machineId, agentId, authFilePath)
 }
 
 export function derivePersistedMachineId(configured?: string): string {
@@ -89,13 +64,14 @@ export class LeaseStateStore {
     return agentId
   }
 
-  load(machineId: string, agentId: string): LeaseState {
+  load(machineId: string, agentId: string, authFilePath = '~/.codex/auth.json'): LeaseState {
     const stored = this.memento.get<LeaseState>(STATE_KEY)
     return {
-      ...defaultLeaseState(machineId, agentId),
+      ...defaultLeaseState(machineId, agentId, authFilePath),
       ...stored,
       machineId,
       agentId,
+      authFilePath,
     }
   }
 
@@ -103,56 +79,32 @@ export class LeaseStateStore {
     await this.memento.update(STATE_KEY, state)
   }
 
-  async clear(machineId: string, agentId: string): Promise<LeaseState> {
-    const next = defaultLeaseState(machineId, agentId)
+  async clear(machineId: string, agentId: string, authFilePath = '~/.codex/auth.json'): Promise<LeaseState> {
+    const next = defaultLeaseState(machineId, agentId, authFilePath)
     await this.save(next)
     return next
   }
 
   async updateFromLease(state: LeaseState, lease: Lease): Promise<LeaseState> {
-    const next: LeaseState = {
-      ...state,
-      leaseId: lease.id,
-      credentialId: lease.credential_id,
-      issuedAt: lease.issued_at,
-      expiresAt: lease.expires_at,
-      leaseState: lease.state,
-      latestTelemetryAt: lease.last_telemetry_at,
-      latestUtilizationPct: lease.latest_utilization_pct,
-      latestQuotaRemaining: lease.latest_quota_remaining,
-      lastBackendRefreshAt: new Date().toISOString(),
-    }
+    const next = updateRuntimeStateFromLease(state, lease)
     await this.save(next)
     return next
   }
 
   async updateFromLeaseStatus(state: LeaseState, status: LeaseStatusResponse): Promise<LeaseState> {
-    const next: LeaseState = {
-      ...state,
-      leaseId: status.lease_id,
-      credentialId: status.credential_id,
-      issuedAt: status.issued_at,
-      expiresAt: status.expires_at,
-      leaseState: status.state,
-      latestTelemetryAt: status.latest_telemetry_at,
-      latestUtilizationPct: status.latest_utilization_pct,
-      latestQuotaRemaining: status.latest_quota_remaining,
-      lastBackendRefreshAt: new Date().toISOString(),
-      replacementRequired: status.replacement_required,
-      rotationRecommended: status.rotation_recommended,
-    }
+    const next = updateRuntimeStateFromLeaseStatus(state, status)
     await this.save(next)
     return next
   }
 
   async recordAuthWrite(state: LeaseState, atIso: string): Promise<LeaseState> {
-    const next = { ...state, lastAuthWriteAt: atIso }
+    const next = sharedRecordAuthWrite(state, atIso)
     await this.save(next)
     return next
   }
 
   async recordError(state: LeaseState, atIso: string): Promise<LeaseState> {
-    const next = { ...state, lastErrorAt: atIso }
+    const next = sharedRecordError(state, atIso)
     await this.save(next)
     return next
   }

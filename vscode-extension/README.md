@@ -11,6 +11,27 @@ What it does:
 - posts lightweight lease telemetry back to Auth Manager
 - shows current lease status in a sidebar view and status bar
 
+## Shared runtime
+
+The VS Code extension now uses the same shared lease runtime as the desktop app and headless client:
+
+- `packages/lease-runtime/`
+
+That shared runtime provides:
+
+- typed Auth Manager client calls
+- lease lifecycle decisions
+- runtime lease-state helpers
+- telemetry payload shaping
+- auth payload validation helpers
+
+The extension keeps VS Code-specific concerns local:
+
+- commands
+- webview and status bar UI
+- extension globalState persistence
+- filesystem writes for the active auth file
+
 ## Expected backend support
 
 The extension expects these Auth Manager endpoints:

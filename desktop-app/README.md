@@ -142,5 +142,5 @@ npm run tauri:build
 
 - No tray support in this first pass.
 - The app logs recent events to a local log file and UI panel, but does not yet have a dedicated log-management screen.
-- The shared runtime has been extracted for desktop reuse; the VS Code extension itself is still on its current internal module layout in this pass.
+- The shared runtime is reused across the desktop app, headless client, and VS Code extension so lease lifecycle behavior stays aligned.
 - Windows packaging cannot be fully verified from this Linux environment.

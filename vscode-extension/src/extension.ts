@@ -1,7 +1,12 @@
 import * as vscode from 'vscode'
 import { AuthManagerClient, AuthManagerClientError, type AuthPayload, type LeaseStatusResponse } from './authManagerClient'
 import { authFileExists, writeAuthFile } from './authFile'
-import { deriveLeaseHealthState, needsReacquire, shouldRenewLease, shouldRotateLease, type LeaseHealthState } from './leaseLifecycle'
+import {
+  deriveLeaseHealthState,
+  selectStartupAction,
+  shouldReacquireAfterLookupError,
+  type LeaseHealthState,
+} from './leaseLifecycle'
 import { LeaseStateStore, type LeaseState } from './leaseStateStore'
 import { buildLeaseTelemetryPayload } from './telemetry'
 import { LeaseWebviewProvider, type LeaseViewModel } from './views/leaseWebview'
@@ -41,7 +46,7 @@ class AuthManagerController {
     const configuration = vscode.workspace.getConfiguration()
     const machineId = await this.stateStore.getOrCreateMachineId(configuration.get<string>('authManager.machineId'))
     const agentId = await this.stateStore.getOrCreateAgentId(configuration.get<string>('authManager.agentId'))
-    this.state = this.stateStore.load(machineId, agentId)
+    this.state = this.stateStore.load(machineId, agentId, this.authFilePath())
     this.rebuildClient()
     this.registerCommands()
     this.context.subscriptions.push(
@@ -50,6 +55,7 @@ class AuthManagerController {
       vscode.window.registerWebviewViewProvider(LeaseWebviewProvider.viewType, this.webviewProvider),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration('authManager')) {
+          this.state = { ...this.state, authFilePath: this.authFilePath() }
           this.rebuildClient()
           void this.ensureLease()
           this.restartTimers()
@@ -177,9 +183,9 @@ class AuthManagerController {
         status = await this.client.getLease(this.state.leaseId)
         this.backendReachable = true
       } catch (error) {
-        if (this.shouldReacquireAfterLookupError(error)) {
+        if (shouldReacquireAfterLookupError(error instanceof AuthManagerClientError ? error.status : null)) {
           this.log(`Stored lease ${this.state.leaseId} is gone; reacquiring`)
-          this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId)
+          this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId, this.authFilePath())
           await this.acquireAndMaterializeLease('startup reacquire missing lease')
           return
         }
@@ -188,16 +194,22 @@ class AuthManagerController {
         return
       }
       this.state = await this.stateStore.updateFromLeaseStatus(this.state, status)
-      if (needsReacquire(status)) {
+      const startupAction = selectStartupAction({
+        leaseId: this.state.leaseId,
+        leaseStatus: status,
+        autoRotate: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true),
+        autoRenew: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true),
+      })
+      if (startupAction === 'reacquire') {
         this.log(`Lease ${status.lease_id} is no longer usable; acquiring replacement`)
         await this.acquireAndMaterializeLease('startup reacquire')
         return
       }
-      if (shouldRotateLease(status, vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true))) {
+      if (startupAction === 'rotate') {
         await this.rotateLease()
         return
       }
-      if (shouldRenewLease(status, vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true))) {
+      if (startupAction === 'renew') {
         await this.renewLease()
       }
       if (!(await authFileExists(this.authFilePath()))) {
@@ -221,24 +233,30 @@ class AuthManagerController {
       const status = await this.client.getLease(this.state.leaseId)
       this.backendReachable = true
       this.state = await this.stateStore.updateFromLeaseStatus(this.state, status)
-      if (needsReacquire(status)) {
+      const refreshAction = selectStartupAction({
+        leaseId: this.state.leaseId,
+        leaseStatus: status,
+        autoRotate: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true),
+        autoRenew: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true),
+      })
+      if (refreshAction === 'reacquire') {
         this.log(`Lease ${status.lease_id} is no longer usable during refresh; reacquiring`)
-        this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId)
+        this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId, this.authFilePath())
         await this.acquireAndMaterializeLease('refresh reacquire')
         return
       }
-      if (shouldRotateLease(status, vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true))) {
+      if (refreshAction === 'rotate') {
         await this.rotateLease()
         return
       }
-      if (shouldRenewLease(status, vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true))) {
+      if (refreshAction === 'renew') {
         await this.renewLease()
       }
       this.setMessage(`Lease refreshed at ${new Date().toLocaleTimeString()}.`)
     } catch (error) {
-      if (this.shouldReacquireAfterLookupError(error)) {
+      if (shouldReacquireAfterLookupError(error instanceof AuthManagerClientError ? error.status : null)) {
         this.log(`Stored lease ${this.state.leaseId} was not found during refresh; reacquiring`)
-        this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId)
+        this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId, this.authFilePath())
         await this.acquireAndMaterializeLease('refresh reacquire missing lease')
         return
       }
@@ -316,7 +334,7 @@ class AuthManagerController {
       if (response.status !== 'ok') {
         throw new Error(response.reason || 'Lease release denied')
       }
-      this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId)
+      this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId, this.authFilePath())
       this.setMessage('Lease released.')
     } catch (error) {
       await this.handleBackendError(error, 'Unable to release lease')
@@ -400,6 +418,7 @@ class AuthManagerController {
 
   private async writePayloadToAuthFile(payload: AuthPayload): Promise<void> {
     const result = await writeAuthFile(this.authFilePath(), payload)
+    this.state = { ...this.state, authFilePath: this.authFilePath() }
     this.state = await this.stateStore.recordAuthWrite(this.state, result.writtenAt)
     this.log(`Wrote auth file to ${result.path}`)
   }
@@ -426,10 +445,6 @@ class AuthManagerController {
   private async showLeaseView(): Promise<void> {
     await vscode.commands.executeCommand('workbench.view.extension.authManager')
     await vscode.commands.executeCommand('authManager.leaseView.focus')
-  }
-
-  private shouldReacquireAfterLookupError(error: unknown): boolean {
-    return error instanceof AuthManagerClientError && error.status === 404
   }
 
   private async handleBackendError(error: unknown, userMessage: string, showPopup = true): Promise<void> {

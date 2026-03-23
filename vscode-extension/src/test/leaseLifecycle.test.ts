@@ -1,6 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { deriveLeaseHealthState, needsReacquire, shouldRenewLease, shouldRotateLease } from '../leaseLifecycle'
+import {
+  deriveLeaseHealthState,
+  needsReacquire,
+  selectStartupAction,
+  shouldRenewLease,
+  shouldRotateLease,
+} from '../leaseLifecycle'
 
 test('startup with no lease needs reacquire', () => {
   assert.equal(needsReacquire(null), true)
@@ -44,4 +50,65 @@ test('renew handling triggers near expiry', () => {
     replacement_required: false,
     expires_at: '2026-03-22T00:04:00.000Z',
   }, true, new Date('2026-03-22T00:00:00.000Z')), true)
+})
+
+test('replacement required maps to shared startup rotate action', () => {
+  assert.equal(
+    selectStartupAction({
+      leaseId: 'lease-1',
+      leaseStatus: {
+        lease_id: 'lease-1',
+        credential_id: 'cred-1',
+        state: 'active',
+        issued_at: '2026-03-22T00:00:00.000Z',
+        expires_at: '2026-03-22T02:00:00.000Z',
+        renewed_at: null,
+        machine_id: 'machine-a',
+        agent_id: 'vscode-extension',
+        latest_telemetry_at: null,
+        latest_utilization_pct: 92,
+        latest_quota_remaining: 100,
+        last_success_at: null,
+        last_error_at: null,
+        rotation_recommended: false,
+        replacement_required: true,
+        reason: null,
+        credential_state: 'leased',
+      },
+      autoRotate: true,
+      autoRenew: true,
+    }),
+    'rotate',
+  )
+})
+
+test('near-expiry active lease maps to shared startup renew action', () => {
+  assert.equal(
+    selectStartupAction({
+      leaseId: 'lease-1',
+      leaseStatus: {
+        lease_id: 'lease-1',
+        credential_id: 'cred-1',
+        state: 'active',
+        issued_at: '2026-03-22T00:00:00.000Z',
+        expires_at: '2026-03-22T00:04:00.000Z',
+        renewed_at: null,
+        machine_id: 'machine-a',
+        agent_id: 'vscode-extension',
+        latest_telemetry_at: null,
+        latest_utilization_pct: 12,
+        latest_quota_remaining: 100,
+        last_success_at: null,
+        last_error_at: null,
+        rotation_recommended: false,
+        replacement_required: false,
+        reason: null,
+        credential_state: 'leased',
+      },
+      autoRotate: true,
+      autoRenew: true,
+      now: new Date('2026-03-22T00:00:00.000Z'),
+    }),
+    'renew',
+  )
 })

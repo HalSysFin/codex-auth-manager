@@ -23,7 +23,7 @@
     "onCommand:authManager.showLeaseView",
     "onView:authManager.leaseView"
   ],
-  "main": "./dist/extension.js",
+  "main": "./dist/vscode-extension/src/extension.js",
   "contributes": {
     "commands": [
       {
