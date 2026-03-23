@@ -9,6 +9,7 @@ body{margin:0;background:#0a0a0a;color:#ededed;font-family:Inter,system-ui,sans-
 .btn:hover{border-color:#3a3a3a}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.primary{background:#ededed;color:#0a0a0a;border:none}
+.settings-btn{width:42px;padding:0;display:inline-flex;align-items:center;justify-content:center;font-size:1.1rem}
 .btn.btn-sm{height:36px;padding:0 12px}
 .btn.danger{color:#fda4af;border-color:#7f1d1d}
 .panel{background:#171717;border:1px solid #2b2b2b;border-radius:12px;padding:16px;margin-bottom:16px}
@@ -129,6 +130,8 @@ body{margin:0;background:#0a0a0a;color:#ededed;font-family:Inter,system-ui,sans-
 .modal-card{width:min(860px,95vw);max-height:80vh;overflow:auto;background:#131313;border:1px solid #2b2b2b;border-radius:12px;padding:16px}
 .modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .modal-head h3{margin:0}
+.settings-section{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px;border:1px solid #2b2b2b;border-radius:10px;background:#101010}
+.settings-title{font-weight:600;margin-bottom:4px}
 .graph-meta{display:flex;justify-content:space-between;padding:4px 2px;color:#737373;font-size:.65rem;text-transform:uppercase;letter-spacing:.05em}
 .fallback-banner{margin:0 0 12px;padding:10px 12px;border:1px solid rgba(245,158,11,.35);border-radius:10px;background:rgba(245,158,11,.08);color:#fcd34d;font-size:.9rem}
 

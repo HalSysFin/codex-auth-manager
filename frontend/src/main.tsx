@@ -301,6 +301,7 @@ const defaultAggregate: Aggregate = {
 
 const SESSION_TOKEN = '__session__'
 const ACTION_API_KEY_STORAGE = 'auth_manager_action_api_key'
+const PRIVACY_MODE_STORAGE = 'auth_manager_privacy_mode'
 const RANGE_LABELS: Record<RangeKey, string> = {
   '1d': 'Today',
   '7d': '7d',
@@ -506,10 +507,19 @@ function accountWeeklyRefreshValue(account: Account): number {
   return refreshAt ? refreshAt.getTime() : Number.POSITIVE_INFINITY
 }
 
+function redactText(value: string | null | undefined): string {
+  const source = String(value || '')
+  if (!source) return 'Hidden'
+  const masked = source.replace(/[A-Za-z0-9]/g, '•')
+  return masked.trim() || 'Hidden'
+}
+
 function App() {
   const [apiKey, setApiKey] = useState('')
   const [actionApiKey, setActionApiKey] = useState('')
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false)
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false)
+  const [privacyMode, setPrivacyMode] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [addAccountModalOpen, setAddAccountModalOpen] = useState(false)
   const [addAccountLoading, setAddAccountLoading] = useState(false)
@@ -550,6 +560,7 @@ function App() {
   const streamRef = useRef<EventSource | null>(null)
   const currentLabelRef = useRef<string | null>(currentLabel)
   const hasActionApiKey = actionApiKey.trim().length > 0
+  const sensitiveText = (value: string | null | undefined): string => (privacyMode ? redactText(value) : (value || ''))
 
   const accountCount = accounts.length
   const profilesWithToken = accountCount
@@ -869,6 +880,16 @@ function App() {
     setApiKeyModalOpen(false)
   }
 
+  const togglePrivacyMode = () => {
+    setPrivacyMode((current) => {
+      const next = !current
+      if (next) localStorage.setItem(PRIVACY_MODE_STORAGE, '1')
+      else localStorage.removeItem(PRIVACY_MODE_STORAGE)
+      setStatus(next ? 'Privacy mode enabled' : 'Privacy mode disabled')
+      return next
+    })
+  }
+
   const requireActionApiKey = (actionLabel: string): boolean => {
     if (hasActionApiKey) return true
     setErr(`API key required for ${actionLabel}.`)
@@ -1153,6 +1174,7 @@ function App() {
     const stored = localStorage.getItem(ACTION_API_KEY_STORAGE) || ''
     setActionApiKey(stored)
     setApiKeyInput(stored)
+    setPrivacyMode(localStorage.getItem(PRIVACY_MODE_STORAGE) === '1')
   }, [])
 
   useEffect(() => {
@@ -1225,6 +1247,9 @@ function App() {
       <header className="top">
         <div className="brand"><span className="dot" />Auth Manager</div>
         <div className="top-actions">
+          <button className="btn settings-btn" onClick={() => setSettingsModalOpen(true)} title="Settings" aria-label="Settings">
+            <span aria-hidden="true">⚙</span>
+          </button>
           <button
             className={`btn api-key-btn ${hasActionApiKey ? 'ready' : 'missing'}`}
             onClick={() => setApiKeyModalOpen(true)}
@@ -1288,7 +1313,7 @@ function App() {
               <div style={{ marginTop: 8 }}>
                 {recommended ? (
                   <button className="btn btn-sm rec-btn" onClick={() => void switchAccount(recommended.label)}>
-                    Switch to {recommended.display_label || recommended.label}
+                    Switch to {sensitiveText(recommended.display_label || recommended.label)}
                   </button>
                 ) : (
                   <span className="muted">--</span>
@@ -1346,7 +1371,7 @@ function App() {
                   <div>
                     <div className="profile-title">
                       <button className="profile-link-btn" onClick={() => void openAccountHistory(a.label)}>
-                        {a.display_label || a.label}
+                        {sensitiveText(a.display_label || a.label)}
                       </button>
                       <span className={`refresh-indicator ${refreshState}`}>
                         <span className="refresh-dot" />
@@ -1355,12 +1380,12 @@ function App() {
                       {badge ? <span className="pill" style={badge.style}>{badge.text}</span> : null}
                     </div>
                     <div className="muted account-meta-line">
-                      <span>{a.email || 'email unavailable'}</span>
+                      <span>{privacyMode ? sensitiveText(a.email || 'email unavailable') : (a.email || 'email unavailable')}</span>
                       <span aria-hidden="true">·</span>
                       <span className="mono">{a.account_type || 'ChatGPT Plus'}</span>
                       <CodexBadge />
                     </div>
-                    <div className="muted mono">Profile label: {a.label}</div>
+                    <div className="muted mono">Profile label: {sensitiveText(a.label)}</div>
                     {a.active_lease ? (
                       <div className="muted mono">
                         Leased to {a.active_lease.machine_id} / {a.active_lease.agent_id}
@@ -1558,7 +1583,7 @@ function App() {
               ) : (
                 (usageHistory?.sections.top_consuming_accounts || []).slice(0, 5).map((item) => (
                   <div key={item.account_key} className="muted" style={{ marginTop: 4 }}>
-                    {(item.display_label || item.label)}: <span className="mono">{item.consumed}</span>
+                    {sensitiveText(item.display_label || item.label)}: <span className="mono">{item.consumed}</span>
                   </div>
                 ))
               )}
@@ -1572,7 +1597,7 @@ function App() {
               <label>Recent Rollover Events</label>
               {(usageHistory?.sections.recent_rollovers || []).slice(0, 5).map((item, idx) => (
                 <div key={`r-${idx}`} className="muted" style={{ marginTop: 4 }}>
-                  {(item.display_label || item.label)} · {fmtTs(item.window_ended_at || item.rolled_over_at)}
+                  {sensitiveText(item.display_label || item.label)} · {fmtTs(item.window_ended_at || item.rolled_over_at)}
                 </div>
               ))}
             </div>
@@ -1591,7 +1616,7 @@ function App() {
             {historyError ? <div className="error">{historyError}</div> : null}
             {historyData ? (
               <div>
-                <div className="muted"><strong>{historyData.display_label || historyData.label}</strong> · {historyData.email || 'email unavailable'}</div>
+                <div className="muted"><strong>{sensitiveText(historyData.display_label || historyData.label)}</strong> · {privacyMode ? sensitiveText(historyData.email || 'email unavailable') : (historyData.email || 'email unavailable')}</div>
                 <div className="muted" style={{ marginTop: 4 }}>
                   {accountHistoryRange === '1d'
                     ? `${rangeLabel(accountHistoryRange, historyData.range_metadata)} since midnight${historyData.range_metadata?.timezone ? ` (${historyData.range_metadata.timezone})` : ''}.`
@@ -1808,6 +1833,28 @@ function App() {
                 }}
               >
                 Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {settingsModalOpen ? (
+        <div className="modal-overlay" onClick={() => setSettingsModalOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Settings</h3>
+              <button className="btn btn-sm" onClick={() => setSettingsModalOpen(false)}>Close</button>
+            </div>
+            <div className="settings-section">
+              <div>
+                <div className="settings-title">Privacy Mode</div>
+                <div className="muted">
+                  Redact sensitive account details across the dashboard, including emails, account names, and profile labels.
+                </div>
+              </div>
+              <button className={`btn ${privacyMode ? 'primary' : ''}`} onClick={togglePrivacyMode}>
+                {privacyMode ? 'On' : 'Off'}
               </button>
             </div>
           </div>
