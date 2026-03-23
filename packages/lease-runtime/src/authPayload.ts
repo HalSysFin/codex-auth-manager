@@ -1,4 +1,4 @@
-import type { AuthPayload } from './types'
+import type { AuthPayload } from './types.js'
 
 export function validateAuthPayload(payload: unknown): payload is AuthPayload {
   if (!payload || typeof payload !== 'object') {

@@ -1,0 +1,14 @@
+[Unit]
+Description=Auth Manager Headless Lease Agent
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__HOME__/.local/bin/auth-manager-agent run
+Restart=on-failure
+RestartSec=5
+WorkingDirectory=__REPO_ROOT__
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=default.target

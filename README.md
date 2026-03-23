@@ -6,6 +6,31 @@ Auth profile manager for Codex CLI with:
 - Postgres as canonical persistence
 - Single active `auth.json` materialized on disk
 
+## Repo Components
+
+This repo now contains several clients around the same Auth Manager backend and lease broker:
+
+- `app/`
+  FastAPI backend, broker APIs, account management, analytics, callback relay, and persistence logic.
+- `frontend/`
+  React + Vite web dashboard for account management, usage analytics, and broker visibility.
+- `chrome-extension/`
+  Chrome extension for localhost callback capture and relay into Auth Manager during browser-based login flows.
+- `vscode-extension/`
+  VS Code extension that acquires broker leases, materializes auth into `~/.codex/auth.json`, and keeps the lease healthy inside VS Code.
+- `desktop-app/`
+  Tauri desktop app for Linux/Windows that performs the same broker-backed auth lifecycle without depending on VS Code.
+- `headless-client/`
+  Linux-friendly non-GUI CLI/agent that can ensure a lease, materialize auth, and run a background lease-maintenance loop.
+- `packages/lease-runtime/`
+  Shared TypeScript broker/runtime helpers used for backend client access, lease lifecycle decisions, auth payload validation, state helpers, and telemetry payload generation.
+- `scripts/`
+  Installer/bootstrap helpers, including Linux headless-client install and uninstall scripts.
+- `systemd/`
+  Optional user-service unit files for Linux background agents.
+- `tests/`
+  Backend test coverage for broker logic, analytics, and account behavior.
+
 ## Current Architecture
 
 - **Canonical storage**: Postgres (`saved_profiles`, usage tables, snapshots, metadata).
@@ -122,6 +147,30 @@ Frontend dev:
 cd frontend
 npm install
 npm run dev
+```
+
+VS Code extension:
+```bash
+cd vscode-extension
+npm install
+npm run compile
+npm test
+```
+
+Desktop app:
+```bash
+cd desktop-app
+npm install
+npm test
+npm run build
+```
+
+Headless Linux client:
+```bash
+cd headless-client
+npm install
+npm test
+npm run build
 ```
 
 ## Docker Run
@@ -242,6 +291,74 @@ If callback was returned but not processed:
 - Open popup: `Ctrl+Shift+Y` (`Command+Shift+Y` on macOS)
 - Start relay login: `Ctrl+Shift+L` (`Command+Shift+L` on macOS)
 
+## VS Code Extension
+
+The VS Code extension lives in `vscode-extension/`.
+
+It can:
+
+- ensure a lease on startup
+- refresh, renew, rotate, and release broker leases
+- materialize auth into `~/.codex/auth.json`
+- display lease and usage status in a sidebar and status bar
+
+Key commands:
+
+- `authManager.ensureLease`
+- `authManager.refreshLease`
+- `authManager.rotateLease`
+- `authManager.releaseLease`
+- `authManager.reloadCodexAuth`
+- `authManager.reloadWindow`
+- `authManager.openDashboard`
+
+See [vscode-extension/README.md](/root/auth_manager/vscode-extension/README.md) for setup and usage details.
+
+## Desktop App
+
+The desktop app lives in `desktop-app/` and provides the same broker-backed auth lifecycle without requiring VS Code.
+
+It can:
+
+- ensure a valid lease on startup
+- materialize auth into `~/.codex/auth.json`
+- refresh/renew/rotate/reacquire in the background
+- show lease, usage, and auth-file status in a native desktop UI
+
+Useful commands:
+
+```bash
+cd desktop-app
+npm install
+npm run tauri:dev
+```
+
+See [desktop-app/README.md](/root/auth_manager/desktop-app/README.md) for build and runtime instructions.
+
+## Headless Linux Client
+
+The Linux-friendly non-GUI client lives in `headless-client/`.
+
+It provides:
+
+- `auth-manager-agent ensure`
+- `auth-manager-agent status`
+- `auth-manager-agent renew`
+- `auth-manager-agent rotate`
+- `auth-manager-agent release`
+- `auth-manager-agent run`
+- `auth-manager-agent doctor`
+
+It stores non-secret state under XDG config/state paths, writes `~/.codex/auth.json`, and can run continuously via a user-level systemd service.
+
+Installer and service support:
+
+- installer: [scripts/install-headless-linux.sh](/root/auth_manager/scripts/install-headless-linux.sh)
+- uninstall: [scripts/uninstall-headless-linux.sh](/root/auth_manager/scripts/uninstall-headless-linux.sh)
+- service unit: [systemd/auth-manager-agent.service](/root/auth_manager/systemd/auth-manager-agent.service)
+
+See [headless-client/README.md](/root/auth_manager/headless-client/README.md) for install and usage details.
+
 ## Notes
 
 - DB is source of truth; active auth file is materialized for runtime integration.
@@ -275,3 +392,16 @@ Telemetry and reset behavior:
 - Lease telemetry is persisted as time-series rows keyed by lease, credential, and machine/agent ownership.
 - The latest telemetry summary is copied onto the active lease and credential for quick reads.
 - Weekly reset confirmation is explicit. Elapsed time alone does not restore assignability when `WEEKLY_RESET_CONFIRMATION_REQUIRED=true`.
+
+## Build Scope
+
+The production Docker image build is intentionally focused on the backend and frontend runtime only.
+
+These repo components are excluded from Docker image build context:
+
+- `tests/`
+- `chrome-extension/`
+- `vscode-extension/`
+- `desktop-app/`
+- `headless-client/`
+- `packages/`

@@ -1,4 +1,4 @@
-import type { LeaseAction, LeaseHealthState, LeaseStatusResponse } from './types'
+import type { LeaseAction, LeaseHealthState, LeaseStatusResponse } from './types.js'
 
 export function secondsUntilExpiry(expiresAt: string, now = new Date()): number {
   return Math.max(0, Math.floor((new Date(expiresAt).getTime() - now.getTime()) / 1000))

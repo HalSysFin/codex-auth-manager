@@ -1,4 +1,4 @@
-import type { LeaseTelemetryRequest, RuntimeLeaseState } from './types'
+import type { LeaseTelemetryRequest, RuntimeLeaseState } from './types.js'
 
 export function buildLeaseTelemetryPayload(state: RuntimeLeaseState, capturedAt = new Date().toISOString()): LeaseTelemetryRequest {
   return {

@@ -14,4 +14,5 @@ frontend/dist/
 chrome-extension/
 vscode-extension/
 desktop-app/
+headless-client/
 packages/

@@ -4,7 +4,7 @@ import type {
   LeaseStatusResponse,
   LeaseTelemetryRequest,
   MaterializeLeaseResponse,
-} from './types'
+} from './types.js'
 
 export interface AuthManagerClientOptions {
   baseUrl: string

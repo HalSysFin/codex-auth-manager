@@ -1,4 +1,4 @@
-import type { Lease, LeaseStatusResponse, RuntimeLeaseState, RuntimeSettings } from './types'
+import type { Lease, LeaseStatusResponse, RuntimeLeaseState, RuntimeSettings } from './types.js'
 
 export const DEFAULT_AUTH_FILE_PATH = '~/.codex/auth.json'
 
