@@ -15,4 +15,5 @@ chrome-extension/
 vscode-extension/
 desktop-app/
 headless-client/
+openclaw-plugin/
 packages/

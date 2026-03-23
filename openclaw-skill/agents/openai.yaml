@@ -1,0 +1,3 @@
+interface:
+  display_name: "OpenClaw Codex Lease"
+  short_description: "Acquire and repair Auth Manager leases for OpenClaw and Codex auth."

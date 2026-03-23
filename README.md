@@ -22,6 +22,10 @@ This repo now contains several clients around the same Auth Manager backend and 
   Tauri desktop app for Linux/Windows that performs the same broker-backed auth lifecycle without depending on VS Code.
 - `headless-client/`
   Linux-friendly non-GUI CLI/agent that can ensure a lease, materialize auth, and run a background lease-maintenance loop.
+- `openclaw-skill/`
+  Operational skill and helper scripts for managing OpenClaw Codex leases, auth materialization, and broker telemetry workflows.
+- `openclaw-plugin/`
+  Lightweight TypeScript runtime helper for capturing observed OpenClaw token usage and posting it back to Auth Manager lease telemetry.
 - `packages/lease-runtime/`
   Shared TypeScript broker/runtime helpers used for backend client access, lease lifecycle decisions, auth payload validation, state helpers, and telemetry payload generation.
 - `scripts/`
@@ -359,6 +363,18 @@ Installer and service support:
 
 See [headless-client/README.md](/root/auth_manager/headless-client/README.md) for install and usage details.
 
+## OpenClaw Integration
+
+OpenClaw support in this repo is split into two parts:
+
+- [openclaw-skill/SKILL.md](/root/auth_manager/openclaw-skill/SKILL.md)
+  for lease repair, auth materialization, and operational workflows
+- [openclaw-plugin/README.md](/root/auth_manager/openclaw-plugin/README.md)
+  for runtime token-usage capture and lease telemetry posting
+
+The skill is useful when a human or assistant needs to repair or rotate a lease.
+The plugin is useful when OpenClaw itself can observe `prompt_tokens`, `completion_tokens`, or similar usage fields and send them back to Auth Manager.
+
 ## Notes
 
 - DB is source of truth; active auth file is materialized for runtime integration.
@@ -404,4 +420,5 @@ These repo components are excluded from Docker image build context:
 - `vscode-extension/`
 - `desktop-app/`
 - `headless-client/`
+- `openclaw-plugin/`
 - `packages/`
