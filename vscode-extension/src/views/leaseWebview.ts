@@ -15,6 +15,7 @@ export interface LeaseWebviewCommandHandlers {
   onRefresh(): void
   onRenew(): void
   onRotate(): void
+  onRequestNewLease(): void
   onRelease(): void
   onReloadAuth(): void
   onReloadWindow(): void
@@ -50,6 +51,9 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
           break
         case 'rotate':
           this.handlers.onRotate()
+          break
+        case 'requestNewLease':
+          this.handlers.onRequestNewLease()
           break
         case 'release':
           this.handlers.onRelease()
@@ -99,9 +103,11 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         <h1>Codex Auth Manager</h1>
         <div id="healthPill" class="pill">No Lease</div>
       </div>
+      <div id="accountName" class="accountName">No Lease</div>
       <div class="actions">
         <button data-command="refresh">Refresh</button>
         <button data-command="renew">Renew</button>
+        <button data-command="requestNewLease">Request New Auth Lease</button>
         <button data-command="rotate">Rotate</button>
         <button data-command="release">Release</button>
         <button data-command="openDashboard">Open Dashboard</button>
@@ -126,8 +132,10 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
       }
       function render(payload) {
         const healthPill = document.getElementById('healthPill');
+        const accountName = document.getElementById('accountName');
         const details = document.getElementById('details');
         const message = document.getElementById('message');
+        const state = payload.state;
         const titleMap = {
           active: 'Active',
           expiring: 'Expiring',
@@ -138,10 +146,11 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         };
         healthPill.textContent = titleMap[payload.healthState] || payload.healthState.replace(/_/g, ' ');
         healthPill.className = 'pill ' + payload.healthState;
+        accountName.textContent = state.accountLabel || state.accountName || state.credentialId || 'No Lease';
         message.textContent = payload.lastMessage || '';
         message.style.display = payload.lastMessage ? 'block' : 'none';
-        const state = payload.state;
         const rows = [
+          ['Account', state.accountLabel || state.accountName || state.credentialId],
           ['Lease State', state.leaseState],
           ['Credential Id', state.credentialId],
           ['Lease Id', state.leaseId],

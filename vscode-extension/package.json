@@ -15,6 +15,7 @@
     "onStartupFinished",
     "onCommand:authManager.ensureLease",
     "onCommand:authManager.refreshLease",
+    "onCommand:authManager.requestNewLease",
     "onCommand:authManager.rotateLease",
     "onCommand:authManager.releaseLease",
     "onCommand:authManager.reloadCodexAuth",
@@ -33,6 +34,10 @@
       {
         "command": "authManager.refreshLease",
         "title": "Auth Manager: Refresh Lease"
+      },
+      {
+        "command": "authManager.requestNewLease",
+        "title": "Auth Manager: Request New Auth Lease"
       },
       {
         "command": "authManager.rotateLease",

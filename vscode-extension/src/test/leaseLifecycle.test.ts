@@ -8,7 +8,7 @@ import {
   shouldRenewLease,
   shouldRotateLease,
 } from '../leaseLifecycle'
-import { healthParityCases, startupParityCases } from '../../../packages/lease-runtime/src/test/parityMatrix.ts'
+import { healthParityCases, startupParityCases } from '../../../packages/lease-runtime/src/test/parityMatrix.js'
 
 test('startup with no lease needs reacquire', () => {
   assert.equal(needsReacquire(null), true)

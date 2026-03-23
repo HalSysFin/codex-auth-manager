@@ -1,9 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { AuthManagerClient } from '../authManagerClient.ts'
-import { prepareAuthPayloadForWrite, validateAuthPayload } from '../authPayload.ts'
-import { AuthManagerClientError } from '../authManagerClient.ts'
+import { AuthManagerClient } from '../authManagerClient.js'
+import { prepareAuthPayloadForWrite, validateAuthPayload } from '../authPayload.js'
+import { AuthManagerClientError } from '../authManagerClient.js'
 
 test('acquire plus materialize returns a writable auth payload', async () => {
   const seenPaths: string[] = []
@@ -11,7 +11,7 @@ test('acquire plus materialize returns a writable auth payload', async () => {
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: 'secret-token',
     allowInsecureLocalhost: true,
-    fetchImpl: async (input, init) => {
+    fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
       seenPaths.push(url)
       if (url.endsWith('/api/leases/acquire')) {
@@ -116,7 +116,7 @@ test('telemetry post preserves truthful null counters when client has no token d
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: 'secret-token',
     allowInsecureLocalhost: true,
-    fetchImpl: async (_input, init) => {
+    fetchImpl: async (_input: RequestInfo | URL, init?: RequestInit) => {
       postedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
       return new Response(JSON.stringify({ status: 'ok', reason: null, lease: null }), { status: 200 })
     },
@@ -139,10 +139,11 @@ test('telemetry post preserves truthful null counters when client has no token d
   })
 
   assert.ok(postedBody)
-  assert.equal(postedBody?.requests_count, null)
-  assert.equal(postedBody?.tokens_in, null)
-  assert.equal(postedBody?.tokens_out, null)
-  assert.equal(postedBody?.utilization_pct, 42)
+  const body = postedBody as Record<string, unknown>
+  assert.equal(body.requests_count, null)
+  assert.equal(body.tokens_in, null)
+  assert.equal(body.tokens_out, null)
+  assert.equal(body.utilization_pct, 42)
 })
 
 test('rotate plus materialize returns the replacement auth payload', async () => {
@@ -150,7 +151,7 @@ test('rotate plus materialize returns the replacement auth payload', async () =>
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: 'secret-token',
     allowInsecureLocalhost: true,
-    fetchImpl: async (input) => {
+    fetchImpl: async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/leases/rotate')) {
         return new Response(JSON.stringify({

@@ -46,12 +46,13 @@ test('LeaseStateStore persists lease metadata', async () => {
     last_success_at: null,
     last_error_at: null,
     reason: null,
-    metadata: null,
+    metadata: { label: 'max' },
     created_at: '2026-03-22T00:00:00.000Z',
     updated_at: '2026-03-22T00:00:00.000Z',
   })
   assert.equal(state.leaseId, 'lease-1')
   assert.equal(state.credentialId, 'cred-1')
+  assert.equal(state.accountLabel, 'max')
   assert.equal(state.latestUtilizationPct, 12)
   assert.equal(state.authFilePath, '~/.codex/auth.json')
   assert.ok(state.lastBackendRefreshAt)

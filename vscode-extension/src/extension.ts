@@ -7,15 +7,17 @@ import {
   shouldReacquireAfterLookupError,
   type LeaseHealthState,
 } from './leaseLifecycle'
+import { requestFreshLease } from './requestFreshLease'
 import { LeaseStateStore, type LeaseState } from './leaseStateStore'
+import { deriveAccountDisplayName, extractAccountIdentity, formatStatusBarText, formatStatusBarTooltip } from './statusPresentation'
 import { buildLeaseTelemetryPayload } from './telemetry'
 import { LeaseWebviewProvider, type LeaseViewModel } from './views/leaseWebview'
 
-type ManualAction = 'refresh' | 'renew' | 'rotate' | 'release' | 'reload'
+type ManualAction = 'refresh' | 'renew' | 'rotate' | 'release' | 'reload' | 'requestNew'
 
 class AuthManagerController {
   private readonly output = vscode.window.createOutputChannel('Codex Auth Manager')
-  private readonly statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100)
+  private readonly statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100)
   private readonly stateStore: LeaseStateStore
   private readonly webviewProvider: LeaseWebviewProvider
   private refreshTimer: NodeJS.Timeout | undefined
@@ -32,6 +34,7 @@ class AuthManagerController {
       onRefresh: () => void this.refreshLease('refresh'),
       onRenew: () => void this.renewLease(),
       onRotate: () => void this.rotateLease(),
+      onRequestNewLease: () => void this.requestNewLease(),
       onRelease: () => void this.releaseLease(),
       onReloadAuth: () => void this.reloadCodexAuth(),
       onReloadWindow: () => void this.reloadWindow(),
@@ -71,6 +74,7 @@ class AuthManagerController {
     this.context.subscriptions.push(
       vscode.commands.registerCommand('authManager.ensureLease', async () => this.ensureLease()),
       vscode.commands.registerCommand('authManager.refreshLease', async () => this.refreshLease('refresh')),
+      vscode.commands.registerCommand('authManager.requestNewLease', async () => this.requestNewLease()),
       vscode.commands.registerCommand('authManager.rotateLease', async () => this.rotateLease()),
       vscode.commands.registerCommand('authManager.releaseLease', async () => this.releaseLease()),
       vscode.commands.registerCommand('authManager.reloadCodexAuth', async () => this.reloadCodexAuth()),
@@ -113,10 +117,8 @@ class AuthManagerController {
 
   private updatePresentation(): void {
     const healthState = this.currentHealthState()
-    this.statusBar.text = `Auth Lease: ${this.statusBarLabel(healthState)}`
-    this.statusBar.tooltip = this.state.leaseId
-      ? `Lease ${this.state.leaseId} (${this.state.leaseState || 'unknown'})`
-      : 'No active Auth Manager lease'
+    this.statusBar.text = formatStatusBarText(this.state, healthState)
+    this.statusBar.tooltip = formatStatusBarTooltip(this.state, healthState)
     this.webviewProvider.update(this.currentViewModel())
   }
 
@@ -136,23 +138,6 @@ class AuthManagerController {
       rotation_recommended: this.state.rotationRecommended,
       expires_at: this.state.expiresAt,
     })
-  }
-
-  private statusBarLabel(state: LeaseHealthState): string {
-    switch (state) {
-      case 'active':
-        return 'Active'
-      case 'expiring':
-        return 'Expiring'
-      case 'rotation_required':
-        return 'Rotate'
-      case 'revoked':
-        return 'Revoked'
-      case 'backend_unavailable':
-        return 'Backend Down'
-      default:
-        return 'No Lease'
-    }
   }
 
   private currentViewModel(): LeaseViewModel {
@@ -318,6 +303,40 @@ class AuthManagerController {
     }
   }
 
+  async requestNewLease(): Promise<void> {
+    this.log('Requesting a fresh auth lease')
+    try {
+      await requestFreshLease({
+        currentLeaseId: this.state.leaseId,
+        releaseCurrentLease: async () => {
+          if (!this.state.leaseId) {
+            return
+          }
+          try {
+            await this.client.releaseLease(this.state.leaseId, {
+              machineId: this.state.machineId,
+              agentId: this.state.agentId,
+              reason: 'Manual fresh lease request from VS Code extension',
+            })
+          } catch (error) {
+            this.log(`Existing lease release before fresh acquire failed: ${error instanceof Error ? error.message : String(error)}`)
+          } finally {
+            this.state = await this.stateStore.clear(this.state.machineId, this.state.agentId, this.authFilePath())
+          }
+        },
+        acquireFreshLease: async () => {
+          await this.acquireAndMaterializeLease('manual request new lease')
+        },
+      })
+      this.setMessage(`Fresh auth lease acquired for ${deriveAccountDisplayName(this.state)}.`)
+      void vscode.window.showInformationMessage(`Fresh auth lease acquired for ${deriveAccountDisplayName(this.state)}.`)
+    } catch (error) {
+      await this.handleBackendError(error, 'Unable to request a fresh auth lease')
+    } finally {
+      this.updatePresentation()
+    }
+  }
+
   async releaseLease(): Promise<void> {
     if (!this.state.leaseId) {
       this.setMessage('No active lease to release.')
@@ -411,6 +430,13 @@ class AuthManagerController {
     }
     const payload = materialized.credential_material.auth_json
     await this.writePayloadToAuthFile(payload)
+    const identity = extractAccountIdentity(materialized)
+    this.state = {
+      ...this.state,
+      accountLabel: identity.accountLabel,
+      accountName: identity.accountName,
+    }
+    await this.stateStore.save(this.state)
     if (materialized.lease) {
       this.state = await this.stateStore.updateFromLease(this.state, materialized.lease)
     }

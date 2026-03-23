@@ -9,7 +9,7 @@ What it does:
 - rotates or reacquires when the lease is no longer usable
 - materializes the leased auth payload into `~/.codex/auth.json`
 - posts lightweight lease telemetry back to Auth Manager
-- shows current lease status in a sidebar view and status bar
+- shows current lease status in a sidebar view and a right-aligned status bar that includes the current account label when known
 
 ## Shared runtime
 
@@ -94,12 +94,22 @@ Authorization: Bearer <authManager.internalApiToken>
 
 - `authManager.ensureLease`
 - `authManager.refreshLease`
+- `authManager.requestNewLease`
 - `authManager.rotateLease`
 - `authManager.releaseLease`
 - `authManager.reloadCodexAuth`
 - `authManager.reloadWindow`
 - `authManager.openDashboard`
 - `authManager.showLeaseView`
+
+`authManager.requestNewLease` is a manual fresh-lease action. It does not renew the current lease. Instead, the extension releases the current lease when possible, acquires a new lease from the broker, materializes the new auth payload, and rewrites `~/.codex/auth.json`.
+
+The status bar uses the best available account identity in this order:
+
+1. `credential_material.label`
+2. `credential_material.name`
+3. `lease.metadata.label`
+4. `credential_id`
 
 ## Auth file behavior
 

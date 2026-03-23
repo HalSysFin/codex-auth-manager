@@ -5,9 +5,9 @@ import {
   deriveLeaseHealthState,
   selectStartupAction,
   shouldReacquireAfterLookupError,
-} from '../leaseLifecycle.ts'
-import type { LeaseStatusResponse } from '../types.ts'
-import { deniedReason, healthParityCases, startupParityCases } from './parityMatrix.ts'
+} from '../leaseLifecycle.js'
+import type { LeaseStatusResponse } from '../types.js'
+import { deniedReason, healthParityCases, startupParityCases } from './parityMatrix.js'
 
 function buildLeaseStatus(overrides: Partial<LeaseStatusResponse> = {}): LeaseStatusResponse {
   return {

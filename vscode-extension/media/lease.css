@@ -21,6 +21,12 @@ h1 {
   margin: 0;
 }
 
+.accountName {
+  margin-top: 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
 .pill {
   border-radius: 999px;
   padding: 4px 10px;

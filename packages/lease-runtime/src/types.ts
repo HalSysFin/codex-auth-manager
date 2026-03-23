@@ -96,6 +96,8 @@ export interface RuntimeLeaseState {
   agentId: string
   leaseId: string | null
   credentialId: string | null
+  accountLabel: string | null
+  accountName: string | null
   issuedAt: string | null
   expiresAt: string | null
   leaseState: string | null
