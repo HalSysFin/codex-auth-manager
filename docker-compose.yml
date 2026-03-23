@@ -54,19 +54,6 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
-    environment:
-      VITE_API_BASE_URL: "${VITE_API_BASE_URL:-http://auth-manager:8080}"
-    ports:
-      - "5173:5173"
-    depends_on:
-      auth-manager:
-        condition: service_started
-    restart: unless-stopped
-
 volumes:
   postgres_data:
   codex_auth:

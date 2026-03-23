@@ -192,8 +192,9 @@ docker compose up -d
 ```
 
 Services:
-- API/backend: `http://localhost:8080`
-- Frontend dev server: `http://localhost:5173`
+- Auth Manager app: `http://localhost:8080`
+
+The published backend image already contains the built frontend, so the default compose stack does not build a separate frontend container.
 
 ## AMD64 / ARM64 Installation Notes
 
@@ -207,8 +208,7 @@ The GitHub workflow builds and publishes multi-arch images to GHCR.
 
 The included `docker-compose.yml` pulls:
 
-- `ghcr.io/halsysfin/codex-auth-manager:latest` for backend (AMD64 + ARM64 manifest)
-- builds frontend locally from `frontend/Dockerfile.dev`
+- `ghcr.io/halsysfin/codex-auth-manager:latest` for backend and bundled frontend (AMD64 + ARM64 manifest)
 
 ```bash
 docker compose pull auth-manager
@@ -220,7 +220,7 @@ Docker automatically pulls the correct backend architecture variant for your hos
 ### Option B: Build backend locally from source (dev/test)
 
 Use the included local override file (`docker-compose.local.yml`) which swaps
-`auth-manager` to a local build.
+`auth-manager` to a local build and starts the frontend dev server from local source.
 
 Then run:
 
