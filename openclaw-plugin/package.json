@@ -1,0 +1,30 @@
+{
+  "name": "openclaw-auth-manager-plugin",
+  "version": "0.1.1",
+  "type": "module",
+  "description": "Plugin-ready Auth Manager lease telemetry module for OpenClaw.",
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ]
+  },
+  "exports": {
+    ".": "./dist/src/index.js",
+    "./openclaw-entry": "./dist/src/openclaw-entry.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "index.js",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "tsx --test \"src/test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.3"
+  }
+}

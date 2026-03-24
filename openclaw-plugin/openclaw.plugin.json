@@ -1,0 +1,29 @@
+{
+  "id": "auth-manager-lease-telemetry",
+  "name": "Auth Manager Lease Telemetry",
+  "description": "Acquire/renew leases, materialize auth, enforce lease-active auth, and post telemetry.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {
+      "baseUrl": { "type": "string" },
+      "internalApiToken": { "type": "string" },
+      "machineId": { "type": "string" },
+      "agentId": { "type": "string" },
+      "leaseId": { "type": ["string", "null"] },
+      "authFilePath": { "type": "string" },
+      "leaseProfileId": { "type": "string" },
+      "enforceLeaseAsActiveAuth": { "type": "boolean" },
+      "disallowNonLeaseAuth": { "type": "boolean" },
+      "purgeNonLeaseProfilesOnStart": { "type": "boolean" },
+      "requestedTtlSeconds": { "type": "number" },
+      "refreshIntervalMs": { "type": "number" },
+      "autoRenew": { "type": "boolean" },
+      "autoRotate": { "type": "boolean" },
+      "rotationPolicy": { "type": "string" },
+      "flushIntervalMs": { "type": "number" },
+      "flushEveryRequests": { "type": "number" },
+      "releaseLeaseOnShutdown": { "type": "boolean" }
+    }
+  }
+}
