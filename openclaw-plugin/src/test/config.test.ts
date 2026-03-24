@@ -19,6 +19,11 @@ test('resolvePluginConfig prefers explicit config and applies defaults', () => {
   assert.equal(config.machineId, 'machine-a')
   assert.equal(config.agentId, 'openclaw')
   assert.equal(config.flushEveryRequests, 5)
+  assert.equal(config.authFilePath, '~/.codex/auth.json')
+  assert.equal(config.requestedTtlSeconds, 1800)
+  assert.equal(config.autoRenew, true)
+  assert.equal(config.autoRotate, false)
+  assert.equal(config.releaseLeaseOnShutdown, false)
   assert.equal(config.enabled, true)
 })
 
@@ -39,8 +44,16 @@ test('validatePluginConfig reports missing required fields', () => {
     internalApiToken: '',
     machineId: '',
     agentId: '',
+    authFilePath: '~/.codex/auth.json',
     flushIntervalMs: 500,
     flushEveryRequests: 0,
+    refreshIntervalMs: 60_000,
+    requestedTtlSeconds: 1800,
+    autoRenew: true,
+    autoRotate: true,
+    rotationPolicy: 'replacement_required_only',
+    allowInsecureLocalhost: true,
+    releaseLeaseOnShutdown: true,
     enabled: true,
   })
 

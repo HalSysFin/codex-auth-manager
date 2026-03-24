@@ -8,6 +8,7 @@ test('telemetry client sends Authorization bearer header from internalApiToken',
   const client = new AuthManagerTelemetryClient({
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: 'secret-token',
+    allowInsecureLocalhost: true,
     fetchImpl: async (_input, init) => {
       authHeader = String((init?.headers as Record<string, string>).Authorization)
       return new Response(JSON.stringify({ status: 'ok' }), { status: 200 })
@@ -31,6 +32,7 @@ test('telemetry client surfaces missing token responses cleanly', async () => {
   const client = new AuthManagerTelemetryClient({
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: '',
+    allowInsecureLocalhost: true,
     fetchImpl: async () => new Response(JSON.stringify({ detail: 'Missing bearer token' }), { status: 401 }),
   })
 

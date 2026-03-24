@@ -42,15 +42,22 @@ export function createAuthManagerOpenClawEntry(): OpenClawPluginLikeDefinition {
             baseUrl: config.baseUrl,
             internalApiToken: config.internalApiToken,
             logger: api.logger,
+            authFilePath: config.authFilePath,
+            allowInsecureLocalhost: config.allowInsecureLocalhost,
+            requestedTtlSeconds: config.requestedTtlSeconds,
+            autoRenew: config.autoRenew,
+            autoRotate: config.autoRotate,
+            rotationPolicy: config.rotationPolicy,
+            refreshIntervalMs: config.refreshIntervalMs,
+            releaseLeaseOnShutdown: config.releaseLeaseOnShutdown,
             flushIntervalMs: config.flushIntervalMs,
             flushEveryRequests: config.flushEveryRequests,
             context: toLeaseContext(config),
           })
-          service.start()
+          await service.start()
         },
         async stop() {
-          await service.flushNow()
-          service.stop()
+          await service.shutdown()
         },
       })
     },
@@ -83,19 +90,24 @@ export function buildUsageObserver(service = createOpenClawLeaseTelemetryService
         baseUrl: params.config.baseUrl,
         internalApiToken: params.config.internalApiToken,
         logger: params.logger,
+        authFilePath: params.config.authFilePath,
+        allowInsecureLocalhost: params.config.allowInsecureLocalhost,
+        requestedTtlSeconds: params.config.requestedTtlSeconds,
+        autoRenew: params.config.autoRenew,
+        autoRotate: params.config.autoRotate,
+        rotationPolicy: params.config.rotationPolicy,
+        refreshIntervalMs: params.config.refreshIntervalMs,
+        releaseLeaseOnShutdown: params.config.releaseLeaseOnShutdown,
         flushIntervalMs: params.config.flushIntervalMs,
         flushEveryRequests: params.config.flushEveryRequests,
         context: toLeaseContext(params.config),
       })
-      instance.start()
+      void instance.start()
       return {
         observeUsage: (raw) => instance.observeUsage(raw),
         setLeaseContext: (context) => instance.setLeaseContext(context),
         flushNow: () => instance.flushNow(),
-        stop: async () => {
-          await instance.flushNow()
-          instance.stop()
-        },
+        stop: async () => instance.shutdown(),
       }
     },
   }

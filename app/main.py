@@ -37,6 +37,7 @@ from .account_usage_store import (
     get_saved_profile,
     get_account,
     get_active_profile_label,
+    get_runtime_settings,
     initialize_usage_store,
     list_absolute_usage_snapshots,
     list_usage_rollovers,
@@ -54,6 +55,7 @@ from .account_usage_store import (
     sync_account_rate_limit_percentages,
     sync_account_usage_snapshot,
     touch_profile_last_used,
+    update_runtime_settings,
     upsert_saved_profile,
 )
 from .lease_broker_store import (
@@ -113,7 +115,6 @@ from .login_sessions import (
 
 app = FastAPI(title="Codex Auth Manager", version="0.2.0")
 logger = logging.getLogger(__name__)
-_RECONCILE_INTERVAL_SECONDS = max(int(settings.analytics_snapshot_interval_seconds or 600), 60)
 _LEASE_RECONCILE_INTERVAL_SECONDS = 15
 _LIVE_REFRESH_CONCURRENCY = 4
 _USAGE_STALE_SECONDS = 1800
@@ -140,6 +141,15 @@ class PersistCurrentAuthResult:
     created_new_profile: bool
     up_to_date: bool
     codex_switch: dict[str, Any] | None
+
+
+def _runtime_settings_payload() -> dict[str, Any]:
+    return get_runtime_settings()
+
+
+def _usage_snapshot_interval_seconds() -> int:
+    runtime = _runtime_settings_payload()
+    return max(int(runtime.get("analytics_snapshot_interval_seconds") or 600), 60)
 
 
 def _audit_broker_event(event: str, **fields: Any) -> None:
@@ -274,7 +284,7 @@ async def on_shutdown() -> None:
 
 async def _periodic_reconcile_usage_windows() -> None:
     while True:
-        await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
+        await asyncio.sleep(_usage_snapshot_interval_seconds())
         try:
             refreshed = reconcile_due_accounts(now=datetime.now(timezone.utc))
             if refreshed:
@@ -313,6 +323,18 @@ async def web_login_guard(request: Request, call_next):
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/settings")
+async def api_settings() -> JSONResponse:
+    return JSONResponse({"runtime": _runtime_settings_payload()})
+
+
+@app.post("/api/settings")
+async def api_settings_update(request: Request, payload: dict[str, Any]) -> JSONResponse:
+    _require_internal_auth(request)
+    updated = update_runtime_settings(payload if isinstance(payload, dict) else {})
+    return JSONResponse({"runtime": updated})
 
 
 @app.get("/login")

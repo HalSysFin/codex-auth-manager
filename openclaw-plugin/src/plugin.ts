@@ -63,6 +63,7 @@ export class OpenClawAuthManagerPlugin {
     this.client = new AuthManagerTelemetryClient({
       baseUrl: options.baseUrl,
       internalApiToken: options.internalApiToken,
+      allowInsecureLocalhost: options.allowInsecureLocalhost,
       fetchImpl: options.fetchImpl,
     })
     this.logger = options.logger ?? console

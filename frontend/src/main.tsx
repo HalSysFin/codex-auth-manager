@@ -341,6 +341,24 @@ type LeaseOverviewResponse = {
   }
 }
 
+type RuntimeSettings = {
+  analytics_snapshot_interval_seconds: number
+  allow_client_initiated_rotation: boolean
+  lease_default_ttl_seconds: number
+  lease_renewal_min_remaining_seconds: number
+  lease_stale_after_seconds: number
+  lease_reclaim_after_seconds: number
+  rotation_request_threshold_percent: number
+  max_assignable_utilization_percent: number
+  exhausted_utilization_percent: number
+  min_quota_remaining: number
+  weekly_reset_confirmation_required: boolean
+}
+
+type SettingsResponse = {
+  runtime: RuntimeSettings
+}
+
 type MachineLeaseDetailResponse = {
   machine_id: string
   summary: {
@@ -412,6 +430,19 @@ const defaultAggregate: Aggregate = {
 const SESSION_TOKEN = '__session__'
 const ACTION_API_KEY_STORAGE = 'auth_manager_action_api_key'
 const PRIVACY_MODE_STORAGE = 'auth_manager_privacy_mode'
+const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
+  analytics_snapshot_interval_seconds: 600,
+  allow_client_initiated_rotation: true,
+  lease_default_ttl_seconds: 3600,
+  lease_renewal_min_remaining_seconds: 300,
+  lease_stale_after_seconds: 60,
+  lease_reclaim_after_seconds: 180,
+  rotation_request_threshold_percent: 90,
+  max_assignable_utilization_percent: 95,
+  exhausted_utilization_percent: 100,
+  min_quota_remaining: 10000,
+  weekly_reset_confirmation_required: true,
+}
 const RANGE_LABELS: Record<RangeKey, string> = {
   '1d': 'Today',
   '7d': '7d',
@@ -642,6 +673,9 @@ function App() {
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [privacyMode, setPrivacyMode] = useState(false)
+  const [managerSettings, setManagerSettings] = useState<RuntimeSettings>(DEFAULT_RUNTIME_SETTINGS)
+  const [settingsLoading, setSettingsLoading] = useState(false)
+  const [settingsSaving, setSettingsSaving] = useState(false)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [addAccountModalOpen, setAddAccountModalOpen] = useState(false)
   const [addAccountLoading, setAddAccountLoading] = useState(false)
@@ -873,6 +907,29 @@ function App() {
     setLeaseLastRefreshedAt(new Date().toISOString())
   }
 
+  const loadManagerSettings = async (token: string) => {
+    const data = await requestJson<SettingsResponse>('/api/settings', token)
+    setManagerSettings({ ...DEFAULT_RUNTIME_SETTINGS, ...(data.runtime || {}) })
+  }
+
+  const saveManagerSettings = async (updates: Partial<RuntimeSettings>) => {
+    if (!requireActionApiKey('settings update')) return
+    setSettingsSaving(true)
+    setErr(null)
+    try {
+      const data = await requestJson<SettingsResponse>('/api/settings', actionApiKey, {
+        method: 'POST',
+        body: JSON.stringify(updates),
+      })
+      setManagerSettings({ ...DEFAULT_RUNTIME_SETTINGS, ...(data.runtime || {}) })
+      setStatus('Manager settings saved')
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : 'Failed to save settings')
+    } finally {
+      setSettingsSaving(false)
+    }
+  }
+
   const startLeaseStream = (token: string) => {
     if (!token.trim()) return
     stopLeaseStream()
@@ -1065,6 +1122,10 @@ function App() {
     setErr(`API key required for ${actionLabel}.`)
     setApiKeyModalOpen(true)
     return false
+  }
+
+  const updateManagerSetting = <K extends keyof RuntimeSettings>(key: K, value: RuntimeSettings[K]) => {
+    setManagerSettings((current) => ({ ...current, [key]: value }))
   }
 
   const refreshNow = async () => {
@@ -1421,6 +1482,10 @@ function App() {
         .catch(() => {})
       return
     }
+    setSettingsLoading(true)
+    void loadManagerSettings(apiKey)
+      .catch(() => {})
+      .finally(() => setSettingsLoading(false))
     void loadCached(apiKey)
       .then(async () => {
         await loadUsageHistory(apiKey, selectedRange)
@@ -1897,6 +1962,129 @@ function App() {
 
           <section className="panel">
             <div className="saved-head">
+              <h3>Lease Policies</h3>
+              <span className="pill">{hasActionApiKey ? 'Editable' : 'Read-only'}</span>
+            </div>
+            <div className="settings-grid">
+              <label className="settings-field">
+                <span>Client-Initiated Rotation</span>
+                <input
+                  type="checkbox"
+                  checked={managerSettings.allow_client_initiated_rotation}
+                  onChange={(e) => updateManagerSetting('allow_client_initiated_rotation', e.target.checked)}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Lease TTL (seconds)</span>
+                <input
+                  type="number"
+                  min={60}
+                  value={managerSettings.lease_default_ttl_seconds}
+                  onChange={(e) => updateManagerSetting('lease_default_ttl_seconds', Number(e.target.value || 60))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Renew If Remaining ≤ (seconds)</span>
+                <input
+                  type="number"
+                  min={15}
+                  value={managerSettings.lease_renewal_min_remaining_seconds}
+                  onChange={(e) => updateManagerSetting('lease_renewal_min_remaining_seconds', Number(e.target.value || 15))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Mark Stale After (seconds)</span>
+                <input
+                  type="number"
+                  min={15}
+                  value={managerSettings.lease_stale_after_seconds}
+                  onChange={(e) => updateManagerSetting('lease_stale_after_seconds', Number(e.target.value || 15))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Reclaim After (seconds)</span>
+                <input
+                  type="number"
+                  min={30}
+                  value={managerSettings.lease_reclaim_after_seconds}
+                  onChange={(e) => updateManagerSetting('lease_reclaim_after_seconds', Number(e.target.value || 30))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Rotation Threshold (%)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={managerSettings.rotation_request_threshold_percent}
+                  onChange={(e) => updateManagerSetting('rotation_request_threshold_percent', Number(e.target.value || 0))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Max Assignable Utilization (%)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={managerSettings.max_assignable_utilization_percent}
+                  onChange={(e) => updateManagerSetting('max_assignable_utilization_percent', Number(e.target.value || 0))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Exhausted At (%)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={managerSettings.exhausted_utilization_percent}
+                  onChange={(e) => updateManagerSetting('exhausted_utilization_percent', Number(e.target.value || 0))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Minimum Quota Remaining</span>
+                <input
+                  type="number"
+                  min={0}
+                  value={managerSettings.min_quota_remaining}
+                  onChange={(e) => updateManagerSetting('min_quota_remaining', Number(e.target.value || 0))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Require Weekly Reset Confirmation</span>
+                <input
+                  type="checkbox"
+                  checked={managerSettings.weekly_reset_confirmation_required}
+                  onChange={(e) => updateManagerSetting('weekly_reset_confirmation_required', e.target.checked)}
+                />
+              </label>
+            </div>
+            <div className="top-actions" style={{ marginTop: 12 }}>
+              <button
+                className="btn primary"
+                disabled={settingsSaving}
+                onClick={() => void saveManagerSettings({
+                  allow_client_initiated_rotation: managerSettings.allow_client_initiated_rotation,
+                  lease_default_ttl_seconds: managerSettings.lease_default_ttl_seconds,
+                  lease_renewal_min_remaining_seconds: managerSettings.lease_renewal_min_remaining_seconds,
+                  lease_stale_after_seconds: managerSettings.lease_stale_after_seconds,
+                  lease_reclaim_after_seconds: managerSettings.lease_reclaim_after_seconds,
+                  rotation_request_threshold_percent: managerSettings.rotation_request_threshold_percent,
+                  max_assignable_utilization_percent: managerSettings.max_assignable_utilization_percent,
+                  exhausted_utilization_percent: managerSettings.exhausted_utilization_percent,
+                  min_quota_remaining: managerSettings.min_quota_remaining,
+                  weekly_reset_confirmation_required: managerSettings.weekly_reset_confirmation_required,
+                })}
+              >
+                {settingsSaving ? 'Saving…' : 'Save Lease Policies'}
+              </button>
+              <div className="muted">
+                {hasActionApiKey ? 'Changes apply to broker decisions without restarting the app.' : 'Set an API key to edit lease policy.'}
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="saved-head">
               <h3>Connected Machines</h3>
               <span className="pill">{leaseOverview?.connected_machines?.length ?? 0}</span>
             </div>
@@ -2299,6 +2487,35 @@ function App() {
               <button className={`btn ${privacyMode ? 'primary' : ''}`} onClick={togglePrivacyMode}>
                 {privacyMode ? 'On' : 'Off'}
               </button>
+            </div>
+            <div className="settings-section" style={{ marginTop: 12 }}>
+              <div style={{ flex: 1 }}>
+                <div className="settings-title">Usage Snapshot Interval</div>
+                <div className="muted">
+                  Controls how often the manager reconciles usage windows and records periodic snapshots for stats/history.
+                </div>
+              </div>
+              <div className="settings-inline">
+                <input
+                  type="number"
+                  min={60}
+                  value={managerSettings.analytics_snapshot_interval_seconds}
+                  onChange={(e) => updateManagerSetting('analytics_snapshot_interval_seconds', Number(e.target.value || 60))}
+                  className="settings-number-input"
+                />
+                <button
+                  className="btn primary"
+                  disabled={settingsSaving}
+                  onClick={() => void saveManagerSettings({
+                    analytics_snapshot_interval_seconds: managerSettings.analytics_snapshot_interval_seconds,
+                  })}
+                >
+                  {settingsSaving ? 'Saving…' : 'Save'}
+                </button>
+              </div>
+            </div>
+            <div className="muted" style={{ marginTop: 10 }}>
+              {settingsLoading ? 'Loading manager settings…' : `Current snapshot interval: ${managerSettings.analytics_snapshot_interval_seconds}s`}
             </div>
           </div>
         </div>

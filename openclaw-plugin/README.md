@@ -2,6 +2,14 @@
 
 This package is a plugin-ready TypeScript module for wiring OpenClaw token usage into the existing Auth Manager lease broker.
 
+For OpenClaw, the intended lease model is a sticky machine lease:
+
+- a machine keeps the same assigned auth
+- the plugin renews that lease so it stays alive
+- the plugin writes the leased auth to `~/.codex/auth.json`
+- the plugin does **not** proactively rotate away from a usable auth
+- a new auth is only acquired when the current one becomes unusable, exhausted, revoked, or otherwise no longer serviceable
+
 It is intended to complement:
 
 - `openclaw-skill/` for lease acquisition, repair, auth materialization, and manual workflows
@@ -9,10 +17,10 @@ It is intended to complement:
 
 ## What it does
 
-- accepts an active lease context:
-  - `leaseId`
-  - `machineId`
-  - `agentId`
+- acquires and renews a sticky lease for the OpenClaw machine
+- materializes the full leased auth payload to the active Codex auth file
+- reuses the same lease on restart when the broker still considers it valid
+- reacquires and rewrites auth automatically when the current leased credential is consumed or revoked
 - normalizes common usage payload shapes from OpenClaw/OpenAI-style responses
 - accumulates per-lease counters in process
 - posts truthful lease telemetry back to Auth Manager
@@ -28,6 +36,8 @@ Auth Manager already stores:
 - `tokens_in`
 - `tokens_out`
 - utilization and quota summary fields
+
+The intent is that OpenClaw receives the full leased auth JSON from Auth Manager, uses that auth for the active machine lease, and then reports back as much truthful token/model usage data as OpenClaw exposes.
 
 ## Supported usage shapes
 
@@ -113,7 +123,7 @@ The intended integration path inside OpenClaw is:
 
 1. load plugin config
 2. start the Auth Manager lease service
-3. acquire or refresh a lease, then materialize auth to `~/.codex/auth.json`
+3. acquire or reuse the machine's sticky lease, then materialize auth to `~/.codex/auth.json`
 4. set/update lease context from the active lease
 5. call `observeUsage(...)` from OpenClaw's existing assistant-usage path
 6. flush on timer and shutdown
@@ -134,9 +144,9 @@ The working prototype uses these exact OpenClaw files:
 Lease context is injected by the Auth Manager lease service itself after:
 
 - acquire
-- rotate
 - reacquire
 - lease refresh
+- renewal
 
 That keeps telemetry pinned to the active lease and clears pending counters when a lease ID changes.
 
@@ -145,7 +155,7 @@ Typical flow:
 1. when a lease is acquired or repaired, call `setLeaseContext(...)`
 2. after each model response, call `observeUsage(responseLikeObject)`
 3. on a timer or after each request batch, call `flushTelemetry()`
-4. when the lease rotates, update the lease context and keep going
+4. when the leased auth becomes unusable, reacquire the next available auth and keep going
 
 The working prototype flushes:
 
@@ -153,7 +163,28 @@ The working prototype flushes:
 - when the per-request threshold is reached
 - during service shutdown
 
-After each telemetry flush it refreshes lease state so `revoked`, `expired`, and `replacement_required` are repaired quickly instead of continuing on a dead lease.
+After each telemetry flush it refreshes lease state so `revoked`, `expired`, and exhausted credentials are repaired quickly instead of continuing on a dead lease.
+
+## Default OpenClaw lease policy
+
+By default this plugin is intentionally configured for permanent-ish machine leases:
+
+- `autoRenew = true`
+- `autoRotate = false`
+- `releaseLeaseOnShutdown = false`
+
+That means:
+
+- the same machine keeps the same auth as long as the broker still considers it usable
+- short restarts do not cause the plugin to voluntarily give the auth back
+- the plugin only switches auth when the current leased credential can no longer be used
+
+If you want a different behavior, you can still override it with env/config:
+
+- `AUTH_MANAGER_AUTO_RENEW`
+- `AUTH_MANAGER_AUTO_ROTATE`
+- `AUTH_MANAGER_RELEASE_LEASE_ON_SHUTDOWN`
+- `AUTH_MANAGER_ROTATION_POLICY`
 
 ## Required OpenClaw-side hook
 

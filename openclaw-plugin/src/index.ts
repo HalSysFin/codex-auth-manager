@@ -1,5 +1,6 @@
 export * from './client.js'
 export * from './config.js'
+export * from './authFile.js'
 export * from './plugin.js'
 export * from './service.js'
 export * from './types.js'

@@ -6,7 +6,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .account_usage_store import _as_utc, _connect, _ensure_schema, _parse_iso, _to_iso
+from .account_usage_store import (
+    _as_utc,
+    _connect,
+    _ensure_schema,
+    _parse_iso,
+    _to_iso,
+    get_runtime_settings,
+)
 from .config import settings
 
 
@@ -26,6 +33,23 @@ ROTATION_REASONS = {
     "expiry_approaching",
     "admin_requested_rotation",
 }
+
+
+def _runtime_value(key: str, default: Any) -> Any:
+    runtime = get_runtime_settings()
+    return runtime.get(key, default)
+
+
+def _runtime_bool(key: str, default: bool) -> bool:
+    return bool(_runtime_value(key, default))
+
+
+def _runtime_int(key: str, default: int) -> int:
+    return int(_runtime_value(key, default))
+
+
+def _runtime_float(key: str, default: float) -> float:
+    return float(_runtime_value(key, default))
 
 
 def initialize_lease_broker_store(db_path: Path | None = None) -> None:
@@ -766,7 +790,7 @@ def rotate_broker_lease(
 ) -> dict[str, Any]:
     if reason not in ROTATION_REASONS:
         return {"status": "denied", "reason": "invalid_rotation_reason", "lease": None}
-    if not settings.allow_client_initiated_rotation:
+    if not _runtime_bool("allow_client_initiated_rotation", settings.allow_client_initiated_rotation):
         return {"status": "denied", "reason": "client_rotation_disabled", "lease": None}
     now_dt = _as_utc(now)
     now_iso = _to_iso(now_dt)
@@ -966,9 +990,9 @@ def get_broker_lease_status(
             lease["state"] == "rotation_required"
             or (
                 lease.get("latest_utilization_pct") is not None
-                and float(lease["latest_utilization_pct"]) >= float(settings.rotation_request_threshold_percent)
+                and float(lease["latest_utilization_pct"]) >= _runtime_float("rotation_request_threshold_percent", settings.rotation_request_threshold_percent)
             )
-            or seconds_remaining <= int(settings.lease_renewal_min_remaining_seconds)
+            or seconds_remaining <= _runtime_int("lease_renewal_min_remaining_seconds", settings.lease_renewal_min_remaining_seconds)
         )
         replacement_required = bool(
             credential["state"] in {"exhausted", "revoked", "expired", "unavailable_for_assignment"}
@@ -995,7 +1019,7 @@ def get_broker_lease_status(
             "credential_state": credential["state"],
             "last_seen_at": lease.get("last_seen_at"),
             "seconds_since_seen": seconds_since_seen,
-            "is_stale": seconds_since_seen is not None and seconds_since_seen >= int(settings.lease_stale_after_seconds),
+            "is_stale": seconds_since_seen is not None and seconds_since_seen >= _runtime_int("lease_stale_after_seconds", settings.lease_stale_after_seconds),
         }
 
 
@@ -1046,19 +1070,19 @@ def is_credential_assignable(
     if state == "degraded":
         return False, "state:degraded"
     utilization_pct = _nullable_float(credential.get("utilization_pct"))
-    if utilization_pct is not None and utilization_pct >= float(settings.exhausted_utilization_percent):
+    if utilization_pct is not None and utilization_pct >= _runtime_float("exhausted_utilization_percent", settings.exhausted_utilization_percent):
         return False, "utilization_exhausted"
-    if utilization_pct is not None and utilization_pct >= float(settings.max_assignable_utilization_percent):
+    if utilization_pct is not None and utilization_pct >= _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent):
         return False, "utilization_above_assignment_threshold"
     quota_remaining = _nullable_int(credential.get("quota_remaining"))
-    if quota_remaining is not None and quota_remaining <= int(settings.min_quota_remaining):
+    if quota_remaining is not None and quota_remaining <= _runtime_int("min_quota_remaining", settings.min_quota_remaining):
         return False, "quota_below_minimum"
     cooldown_until = credential.get("cooldown_until")
     if cooldown_until:
         if _parse_iso(str(cooldown_until)) > now_dt:
             return False, "cooldown_active"
     due_after = credential.get("reset_confirmation_due_after")
-    if settings.weekly_reset_confirmation_required and due_after:
+    if _runtime_bool("weekly_reset_confirmation_required", settings.weekly_reset_confirmation_required) and due_after:
         confirmed_at = credential.get("reset_confirmed_at")
         if not confirmed_at or _parse_iso(str(confirmed_at)) < _parse_iso(str(due_after)):
             return False, "reset_confirmation_pending"
@@ -1152,7 +1176,7 @@ def _credential_is_usable_for_existing_lease(
     if state in {"exhausted", "revoked", "expired", "cooldown", "unavailable_for_assignment"}:
         return False
     due_after = credential.get("reset_confirmation_due_after")
-    if settings.weekly_reset_confirmation_required and due_after:
+    if _runtime_bool("weekly_reset_confirmation_required", settings.weekly_reset_confirmation_required) and due_after:
         confirmed_at = credential.get("reset_confirmed_at")
         if not confirmed_at or _parse_iso(str(confirmed_at)) < _parse_iso(str(due_after)):
             return False
@@ -1169,7 +1193,7 @@ def _expire_lease_if_needed(conn: Any, lease: dict[str, Any], now_dt: datetime) 
         last_seen_dt = _lease_last_seen_dt(lease)
         if last_seen_dt is not None:
             seconds_since_seen = int((now_dt - last_seen_dt).total_seconds())
-            if seconds_since_seen >= int(settings.lease_reclaim_after_seconds):
+            if seconds_since_seen >= _runtime_int("lease_reclaim_after_seconds", settings.lease_reclaim_after_seconds):
                 reason = "lease_heartbeat_timeout"
     if reason is None:
         return
@@ -1209,7 +1233,7 @@ def _apply_telemetry_to_credential(
     reset_confirmed_at = credential.get("reset_confirmed_at")
     utilization = _nullable_float(utilization_pct)
     quota = _nullable_int(quota_remaining)
-    if utilization is not None and utilization >= float(settings.exhausted_utilization_percent):
+    if utilization is not None and utilization >= _runtime_float("exhausted_utilization_percent", settings.exhausted_utilization_percent):
         next_state = "exhausted"
         exhausted_at = exhausted_at or now_iso
         due_after = due_after or weekly_reset_at
@@ -1221,9 +1245,9 @@ def _apply_telemetry_to_credential(
         )
     elif (
         utilization is not None
-        and utilization >= float(settings.rotation_request_threshold_percent)
+        and utilization >= _runtime_float("rotation_request_threshold_percent", settings.rotation_request_threshold_percent)
     ) or (
-        quota is not None and quota <= int(settings.min_quota_remaining)
+        quota is not None and quota <= _runtime_int("min_quota_remaining", settings.min_quota_remaining)
     ):
         conn.execute(
             """
@@ -1235,13 +1259,13 @@ def _apply_telemetry_to_credential(
             """,
             (
                 "approaching_utilization_threshold"
-                if utilization is not None and utilization >= float(settings.rotation_request_threshold_percent)
+                if utilization is not None and utilization >= _runtime_float("rotation_request_threshold_percent", settings.rotation_request_threshold_percent)
                 else "low_quota_remaining",
                 now_iso,
                 lease_id,
             ),
         )
-        if utilization is not None and utilization >= float(settings.max_assignable_utilization_percent):
+        if utilization is not None and utilization >= _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent):
             next_state = "unavailable_for_assignment"
             due_after = due_after or weekly_reset_at
     elif due_after and weekly_reset_at:
@@ -1249,8 +1273,8 @@ def _apply_telemetry_to_credential(
         captured_dt = _parse_iso(captured_iso)
         if (
             captured_dt >= due_dt
-            and (utilization is None or utilization < float(settings.max_assignable_utilization_percent))
-            and (quota is None or quota > int(settings.min_quota_remaining))
+            and (utilization is None or utilization < _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent))
+            and (quota is None or quota > _runtime_int("min_quota_remaining", settings.min_quota_remaining))
         ):
             next_state = "available"
             exhausted_at = None
@@ -1334,15 +1358,15 @@ def _reconcile_credential_row(
         state = "revoked"
     elif cooldown_until and _parse_iso(str(cooldown_until)) > now_dt:
         state = "cooldown"
-    elif due_after and settings.weekly_reset_confirmation_required:
+    elif due_after and _runtime_bool("weekly_reset_confirmation_required", settings.weekly_reset_confirmation_required):
         due_dt = _parse_iso(str(due_after))
         last_telemetry_at = credential.get("last_telemetry_at")
         if (
             not reset_confirmed_at
             and last_telemetry_at
             and _parse_iso(str(last_telemetry_at)) >= due_dt
-            and (utilization is None or utilization < float(settings.max_assignable_utilization_percent))
-            and (quota is None or quota > int(settings.min_quota_remaining))
+            and (utilization is None or utilization < _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent))
+            and (quota is None or quota > _runtime_int("min_quota_remaining", settings.min_quota_remaining))
         ):
             reset_confirmed_at = last_telemetry_at
             conn.execute(
@@ -1350,23 +1374,23 @@ def _reconcile_credential_row(
                 (reset_confirmed_at, now_iso, credential["id"]),
             )
         confirmed_ok = bool(reset_confirmed_at and _parse_iso(str(reset_confirmed_at)) >= due_dt)
-        if confirmed_ok and (utilization is None or utilization < float(settings.max_assignable_utilization_percent)) and (
-            quota is None or quota > int(settings.min_quota_remaining)
+        if confirmed_ok and (utilization is None or utilization < _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent)) and (
+            quota is None or quota > _runtime_int("min_quota_remaining", settings.min_quota_remaining)
         ):
             state = "available"
             due_after = None
-        elif utilization is not None and utilization >= float(settings.exhausted_utilization_percent):
+        elif utilization is not None and utilization >= _runtime_float("exhausted_utilization_percent", settings.exhausted_utilization_percent):
             state = "exhausted"
         else:
             state = "unavailable_for_assignment"
-    elif utilization is not None and utilization >= float(settings.exhausted_utilization_percent):
+    elif utilization is not None and utilization >= _runtime_float("exhausted_utilization_percent", settings.exhausted_utilization_percent):
         state = "exhausted"
         if weekly_reset_at:
             due_after = due_after or weekly_reset_at
     elif (
-        utilization is not None and utilization >= float(settings.max_assignable_utilization_percent)
+        utilization is not None and utilization >= _runtime_float("max_assignable_utilization_percent", settings.max_assignable_utilization_percent)
     ) or (
-        quota is not None and quota <= int(settings.min_quota_remaining)
+        quota is not None and quota <= _runtime_int("min_quota_remaining", settings.min_quota_remaining)
     ):
         state = "unavailable_for_assignment"
         if weekly_reset_at:
@@ -1411,7 +1435,7 @@ def _derive_health_score(
 
 
 def _lease_ttl_seconds(requested_ttl_seconds: int | None) -> int:
-    ttl = requested_ttl_seconds if requested_ttl_seconds is not None else settings.lease_default_ttl_seconds
+    ttl = requested_ttl_seconds if requested_ttl_seconds is not None else _runtime_int("lease_default_ttl_seconds", settings.lease_default_ttl_seconds)
     return max(60, int(ttl))
 
 
@@ -1426,7 +1450,7 @@ def _decode_lease_row(row: dict[str, Any]) -> dict[str, Any]:
     out["seconds_since_seen"] = seconds_since_seen
     out["is_stale"] = bool(
         seconds_since_seen is not None
-        and seconds_since_seen >= int(settings.lease_stale_after_seconds)
+        and seconds_since_seen >= _runtime_int("lease_stale_after_seconds", settings.lease_stale_after_seconds)
         and str(out.get("state") or "") in ACTIVE_LEASE_STATES
     )
     return out

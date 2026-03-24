@@ -1040,6 +1040,108 @@ def set_meta_value(key: str, value: str | None, db_path: Path | None = None) -> 
         )
 
 
+RUNTIME_SETTINGS_KEY = "runtime_settings"
+
+
+def runtime_settings_defaults() -> dict[str, Any]:
+    return {
+        "analytics_snapshot_interval_seconds": max(int(settings.analytics_snapshot_interval_seconds or 600), 60),
+        "allow_client_initiated_rotation": bool(settings.allow_client_initiated_rotation),
+        "lease_default_ttl_seconds": max(int(settings.lease_default_ttl_seconds or 3600), 60),
+        "lease_renewal_min_remaining_seconds": max(int(settings.lease_renewal_min_remaining_seconds or 300), 15),
+        "lease_stale_after_seconds": max(int(settings.lease_stale_after_seconds or 60), 15),
+        "lease_reclaim_after_seconds": max(int(settings.lease_reclaim_after_seconds or 180), 30),
+        "rotation_request_threshold_percent": float(settings.rotation_request_threshold_percent or 90.0),
+        "max_assignable_utilization_percent": float(settings.max_assignable_utilization_percent or 95.0),
+        "exhausted_utilization_percent": float(settings.exhausted_utilization_percent or 100.0),
+        "min_quota_remaining": max(int(settings.min_quota_remaining or 10000), 0),
+        "weekly_reset_confirmation_required": bool(settings.weekly_reset_confirmation_required),
+    }
+
+
+def _normalize_runtime_settings(values: dict[str, Any] | None) -> dict[str, Any]:
+    merged = runtime_settings_defaults()
+    if not isinstance(values, dict):
+        return merged
+
+    def _int(key: str, minimum: int) -> None:
+        raw = values.get(key)
+        if raw is None or raw == "":
+            return
+        try:
+            merged[key] = max(int(raw), minimum)
+        except (TypeError, ValueError):
+            return
+
+    def _float(key: str, minimum: float, maximum: float) -> None:
+        raw = values.get(key)
+        if raw is None or raw == "":
+            return
+        try:
+            merged[key] = min(max(float(raw), minimum), maximum)
+        except (TypeError, ValueError):
+            return
+
+    def _bool(key: str) -> None:
+        raw = values.get(key)
+        if raw is None:
+            return
+        if isinstance(raw, bool):
+            merged[key] = raw
+            return
+        text = str(raw).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            merged[key] = True
+        elif text in {"0", "false", "no", "off"}:
+            merged[key] = False
+
+    _int("analytics_snapshot_interval_seconds", 60)
+    _int("lease_default_ttl_seconds", 60)
+    _int("lease_renewal_min_remaining_seconds", 15)
+    _int("lease_stale_after_seconds", 15)
+    _int("lease_reclaim_after_seconds", 30)
+    _int("min_quota_remaining", 0)
+    _float("rotation_request_threshold_percent", 0.0, 100.0)
+    _float("max_assignable_utilization_percent", 0.0, 100.0)
+    _float("exhausted_utilization_percent", 0.0, 100.0)
+    _bool("allow_client_initiated_rotation")
+    _bool("weekly_reset_confirmation_required")
+
+    if merged["lease_reclaim_after_seconds"] <= merged["lease_stale_after_seconds"]:
+        merged["lease_reclaim_after_seconds"] = merged["lease_stale_after_seconds"] + 60
+    if merged["rotation_request_threshold_percent"] > merged["max_assignable_utilization_percent"]:
+        merged["rotation_request_threshold_percent"] = merged["max_assignable_utilization_percent"]
+    if merged["max_assignable_utilization_percent"] > merged["exhausted_utilization_percent"]:
+        merged["max_assignable_utilization_percent"] = merged["exhausted_utilization_percent"]
+
+    return merged
+
+
+def get_runtime_settings(db_path: Path | None = None) -> dict[str, Any]:
+    raw = get_meta_value(RUNTIME_SETTINGS_KEY, db_path=db_path)
+    if not raw:
+        return runtime_settings_defaults()
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return runtime_settings_defaults()
+    return _normalize_runtime_settings(payload if isinstance(payload, dict) else None)
+
+
+def update_runtime_settings(values: dict[str, Any], db_path: Path | None = None) -> dict[str, Any]:
+    current = get_runtime_settings(db_path=db_path)
+    merged = dict(current)
+    if isinstance(values, dict):
+        merged.update(values)
+    normalized = _normalize_runtime_settings(merged)
+    set_meta_value(
+        RUNTIME_SETTINGS_KEY,
+        json.dumps(normalized, separators=(",", ":"), sort_keys=True),
+        db_path=db_path,
+    )
+    return normalized
+
+
 def migrate_legacy_local_state(
     *,
     sqlite_usage_path: Path | None = None,

@@ -40,6 +40,7 @@ test('plugin aggregates usage and posts telemetry', async () => {
   const plugin = createOpenClawAuthManagerPlugin({
     baseUrl: 'http://127.0.0.1:8080',
     internalApiToken: 'test-token',
+    allowInsecureLocalhost: true,
     context: {
       leaseId: 'lease_123',
       machineId: 'machine-a',
