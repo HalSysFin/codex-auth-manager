@@ -70,6 +70,13 @@ test('derivePersistedMachineId includes host context for remote targets', () => 
   )
 })
 
+test('derivePersistedMachineId includes remote name plus hostname context', () => {
+  assert.equal(
+    derivePersistedMachineId('', 'runtime-machine-id', 'ssh-remote+debian'),
+    'vscode-runtime-machine-id-ssh-remote-debian',
+  )
+})
+
 test('getOrCreateMachineId replaces legacy generated ids with runtime fingerprint ids', async () => {
   const memento = new MemoryMemento()
   await memento.update('authManager.machineId', 'vscode-oldhost-1a2b3c4d')
@@ -106,4 +113,12 @@ test('getOrCreateMachineId changes across remote hosts for the same local client
   const machineB = await store.getOrCreateMachineId('', 'runtime-machine-id', 'ssh-remote+server-b')
   assert.equal(machineA, 'vscode-runtime-machine-id-ssh-remote-server-a')
   assert.equal(machineB, 'vscode-runtime-machine-id-ssh-remote-server-b')
+})
+
+test('getOrCreateMachineId replaces generic remote ids with host-specific ids', async () => {
+  const memento = new MemoryMemento()
+  await memento.update('authManager.machineId', 'vscode-runtime-machine-id-ssh-remote')
+  const store = new LeaseStateStore(memento)
+  const machineId = await store.getOrCreateMachineId('', 'runtime-machine-id', 'ssh-remote+debian')
+  assert.equal(machineId, 'vscode-runtime-machine-id-ssh-remote-debian')
 })

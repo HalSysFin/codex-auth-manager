@@ -1,4 +1,5 @@
 import * as vscode from 'vscode'
+import * as os from 'node:os'
 import { AuthManagerClient, AuthManagerClientError, type AuthPayload, type LeaseStatusResponse } from './authManagerClient'
 import { authFileExists, deleteAuthFile, writeAuthFile } from './authFile'
 import {
@@ -51,8 +52,16 @@ class AuthManagerController {
     if (authority) {
       return authority
     }
+    const workspaceAuthority = vscode.workspace.workspaceFile?.authority?.trim()
+    if (workspaceAuthority) {
+      return workspaceAuthority
+    }
     const remoteName = vscode.env.remoteName?.trim()
+    const hostname = os.hostname().trim()
     if (remoteName) {
+      if (hostname) {
+        return `${remoteName}+${hostname}`
+      }
       return remoteName
     }
     return undefined

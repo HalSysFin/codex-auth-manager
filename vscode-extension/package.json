@@ -2,7 +2,7 @@
   "name": "codex-auth-manager-extension",
   "displayName": "Codex Auth Manager",
   "description": "Manages Auth Manager leases and writes leased auth payloads into ~/.codex/auth.json.",
-  "version": "1.12.3",
+  "version": "1.12.4",
   "publisher": "halsysfin",
   "license": "MIT",
   "repository": {
