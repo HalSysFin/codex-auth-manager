@@ -6,6 +6,10 @@ Auth profile manager for Codex CLI with:
 - Postgres as canonical persistence
 - Single active `auth.json` materialized on disk
 
+## What It Does
+
+Codex Auth Manager manages numerous Codex / ChatGPT account auths, keeps those auths fresh, and helps ensure the highest possible token utilisation across the account pool.
+
 ## Dashboard Preview
 
 ![Codex Auth Manager dashboard](./assets/codex-auth-manager-dashboard.png)
