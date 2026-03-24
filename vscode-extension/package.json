@@ -2,7 +2,7 @@
   "name": "codex-auth-manager-extension",
   "displayName": "Codex Auth Manager",
   "description": "Manages Auth Manager leases and writes leased auth payloads into ~/.codex/auth.json.",
-  "version": "1.12.2",
+  "version": "1.12.3",
   "publisher": "halsysfin",
   "license": "MIT",
   "repository": {
@@ -143,15 +143,6 @@
           "default": true,
           "description": "Automatically rotate leases when replacement is required."
         },
-        "authManager.rotationPolicy": {
-          "type": "string",
-          "enum": [
-            "replacement_required_only",
-            "recommended_or_required"
-          ],
-          "default": "replacement_required_only",
-          "description": "Choose how auto-rotation behaves: strict replacement-required only, or rotate on recommendation as well."
-        },
         "authManager.autoReloadWindowOnLeaseChange": {
           "type": "boolean",
           "default": false,
@@ -166,11 +157,6 @@
           "type": "boolean",
           "default": true,
           "description": "Delete authManager.authFilePath when VS Code shuts down."
-        },
-        "authManager.openDashboardPath": {
-          "type": "string",
-          "default": "",
-          "description": "Optional dashboard path to open relative to authManager.baseUrl."
         },
         "authManager.allowInsecureLocalhost": {
           "type": "boolean",

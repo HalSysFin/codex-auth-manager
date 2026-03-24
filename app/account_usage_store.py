@@ -553,7 +553,7 @@ def list_usage_rollovers(
         rows = conn.execute(
             """
             SELECT id, account_id, window_started_at, window_ended_at, usage_limit, usage_used, usage_wasted,
-                   primary_percent_at_reset, secondary_percent_at_reset, rolled_over_at
+                   primary_percent_at_reset, secondary_percent_at_reset, rolled_over_at, window_type
             FROM usage_rollovers
             WHERE account_id = ?
             ORDER BY window_ended_at ASC, id ASC
@@ -823,6 +823,37 @@ def migrate_account_ids(id_map: dict[str, str], db_path: Path | None = None) -> 
     return changed
 
 
+def reconcile_legacy_account_aliases(db_path: Path | None = None) -> int:
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        profiles = conn.execute(
+            "SELECT label, account_key, email FROM saved_profiles ORDER BY label ASC"
+        ).fetchall()
+        existing_accounts = {
+            str(row["id"])
+            for row in conn.execute("SELECT id FROM accounts").fetchall()
+        }
+
+    id_map: dict[str, str] = {}
+    for row in profiles:
+        label = str(row["label"] or "").strip()
+        account_key = str(row["account_key"] or "").strip()
+        email = str(row["email"] or "").strip()
+        if not label or not account_key:
+            continue
+        label_alias = f"acct:{label}"
+        if label_alias in existing_accounts and label_alias != account_key:
+            id_map[label_alias] = account_key
+        if email:
+            email_alias = f"email:{email}"
+            if email_alias in existing_accounts and email_alias != account_key:
+                id_map[email_alias] = account_key
+
+    if not id_map:
+        return 0
+    return migrate_account_ids(id_map, db_path=db_path)
+
+
 def upsert_saved_profile(
     *,
     label: str,
@@ -1056,6 +1087,9 @@ def runtime_settings_defaults() -> dict[str, Any]:
         "exhausted_utilization_percent": float(settings.exhausted_utilization_percent or 100.0),
         "min_quota_remaining": max(int(settings.min_quota_remaining or 10000), 0),
         "weekly_reset_confirmation_required": bool(settings.weekly_reset_confirmation_required),
+        "rotation_policy_default": "replacement_required_only",
+        "rotation_policy_by_agent": {},
+        "rotation_policy_by_machine": {},
     }
 
 
@@ -1095,6 +1129,28 @@ def _normalize_runtime_settings(values: dict[str, Any] | None) -> dict[str, Any]
         elif text in {"0", "false", "no", "off"}:
             merged[key] = False
 
+    def _rotation_policy(key: str) -> None:
+        raw = values.get(key)
+        if raw is None or raw == "":
+            return
+        text = str(raw).strip()
+        if text in {"replacement_required_only", "recommended_or_required"}:
+            merged[key] = text
+
+    def _rotation_policy_map(key: str) -> None:
+        raw = values.get(key)
+        if not isinstance(raw, dict):
+            return
+        normalized: dict[str, str] = {}
+        for map_key, map_value in raw.items():
+            map_key_text = str(map_key).strip()
+            map_value_text = str(map_value).strip()
+            if not map_key_text:
+                continue
+            if map_value_text in {"replacement_required_only", "recommended_or_required"}:
+                normalized[map_key_text] = map_value_text
+        merged[key] = normalized
+
     _int("analytics_snapshot_interval_seconds", 60)
     _int("lease_default_ttl_seconds", 60)
     _int("lease_renewal_min_remaining_seconds", 15)
@@ -1106,6 +1162,9 @@ def _normalize_runtime_settings(values: dict[str, Any] | None) -> dict[str, Any]
     _float("exhausted_utilization_percent", 0.0, 100.0)
     _bool("allow_client_initiated_rotation")
     _bool("weekly_reset_confirmation_required")
+    _rotation_policy("rotation_policy_default")
+    _rotation_policy_map("rotation_policy_by_agent")
+    _rotation_policy_map("rotation_policy_by_machine")
 
     if merged["lease_reclaim_after_seconds"] <= merged["lease_stale_after_seconds"]:
         merged["lease_reclaim_after_seconds"] = merged["lease_stale_after_seconds"] + 60
@@ -1590,6 +1649,9 @@ def _ensure_schema_postgres(conn: Any) -> None:
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
     conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS auth_updated_at TEXT NULL")
+    conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS primary_percent_at_reset DOUBLE PRECISION NULL")
+    conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS secondary_percent_at_reset DOUBLE PRECISION NULL")
+    conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS window_type TEXT NOT NULL DEFAULT 'short'")
 
     now_iso = _to_iso(datetime.now(timezone.utc))
     conn.execute(
@@ -1604,6 +1666,15 @@ def _ensure_schema_postgres(conn: Any) -> None:
             updated_at = COALESCE(NULLIF(updated_at, ''), %s)
         """,
         (DEFAULT_WINDOW_TYPE, now_iso, now_iso, now_iso),
+    )
+    conn.execute(
+        """
+        UPDATE usage_rollovers
+        SET window_type = 'weekly'
+        WHERE usage_limit = 100
+          AND COALESCE(window_type, 'short') = 'short'
+          AND window_started_at = window_ended_at
+        """
     )
 
 

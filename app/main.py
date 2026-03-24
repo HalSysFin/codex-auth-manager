@@ -45,6 +45,7 @@ from .account_usage_store import (
     migrate_legacy_local_state,
     merge_account_data,
     migrate_account_ids,
+    reconcile_legacy_account_aliases,
     rename_saved_profile,
     rename_account_data,
     record_account_usage,
@@ -258,6 +259,12 @@ async def on_startup() -> None:
     except Exception as exc:
         logger.warning("legacy migration skipped/failed: %s", exc)
     _migrate_usage_keys_from_labels()
+    try:
+        reconciled = reconcile_legacy_account_aliases()
+        if reconciled:
+            logger.info("reconciled legacy account aliases into canonical account keys: %s", reconciled)
+    except Exception as exc:
+        logger.warning("legacy account alias reconciliation failed: %s", exc)
     global _reconcile_task
     global _lease_reconcile_task
     if _reconcile_task is None:
@@ -4006,7 +4013,12 @@ def _compute_hourly_utilization_series(
             value = float(raw)
         except (TypeError, ValueError):
             continue
-        local_dt = captured_dt.astimezone(analytics_tz).replace(minute=0, second=0, microsecond=0)
+        local_captured_dt = captured_dt.astimezone(analytics_tz)
+        local_dt = local_captured_dt.replace(
+            minute=(local_captured_dt.minute // 10) * 10,
+            second=0,
+            microsecond=0,
+        )
         hour_key = local_dt.isoformat().replace("+00:00", "Z")
         bucket = buckets.setdefault(hour_key, {"sum": 0.0, "count": 0.0})
         bucket["sum"] += value
@@ -4039,6 +4051,13 @@ def _is_weekly_rollover(row: dict[str, Any]) -> bool:
         return True
     start_raw = str(row.get("window_started_at") or "")
     end_raw = str(row.get("window_ended_at") or "")
+    if start_raw and end_raw and start_raw == end_raw:
+        try:
+            usage_limit = int(row.get("usage_limit") or 0)
+        except (TypeError, ValueError):
+            usage_limit = 0
+        if usage_limit >= 100:
+            return True
     if not start_raw or not end_raw:
         return False
     try:

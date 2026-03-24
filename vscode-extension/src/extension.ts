@@ -110,12 +110,6 @@ class AuthManagerController {
     })
   }
 
-  private rotationPolicy(): 'replacement_required_only' | 'recommended_or_required' {
-    const configured = vscode.workspace
-      .getConfiguration()
-      .get<string>('authManager.rotationPolicy', 'replacement_required_only')
-    return configured === 'recommended_or_required' ? 'recommended_or_required' : 'replacement_required_only'
-  }
 
   private autoReloadWindowOnLeaseChange(): boolean {
     return vscode.workspace
@@ -225,7 +219,7 @@ class AuthManagerController {
         leaseId: this.state.leaseId,
         leaseStatus: status,
         autoRotate: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true),
-        rotationPolicy: this.rotationPolicy(),
+        rotationPolicy: status.effective_rotation_policy ?? 'replacement_required_only',
         autoRenew: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true),
       })
       if (startupAction === 'reacquire') {
@@ -265,7 +259,7 @@ class AuthManagerController {
         leaseId: this.state.leaseId,
         leaseStatus: status,
         autoRotate: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRotate', true),
-        rotationPolicy: this.rotationPolicy(),
+        rotationPolicy: status.effective_rotation_policy ?? 'replacement_required_only',
         autoRenew: vscode.workspace.getConfiguration().get<boolean>('authManager.autoRenew', true),
       })
       if (refreshAction === 'reacquire') {
@@ -453,8 +447,7 @@ class AuthManagerController {
   async openDashboard(): Promise<void> {
     const config = vscode.workspace.getConfiguration()
     const baseUrl = config.get<string>('authManager.baseUrl', 'http://127.0.0.1:8080').replace(/\/+$/, '')
-    const dashboardPath = config.get<string>('authManager.openDashboardPath', '').trim()
-    const target = dashboardPath ? new URL(dashboardPath, `${baseUrl}/`).toString() : baseUrl
+    const target = `${baseUrl}/ui`
     await vscode.env.openExternal(vscode.Uri.parse(target))
   }
 

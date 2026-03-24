@@ -341,6 +341,8 @@ type LeaseOverviewResponse = {
   }
 }
 
+type RotationPolicy = 'replacement_required_only' | 'recommended_or_required'
+
 type RuntimeSettings = {
   analytics_snapshot_interval_seconds: number
   allow_client_initiated_rotation: boolean
@@ -353,6 +355,9 @@ type RuntimeSettings = {
   exhausted_utilization_percent: number
   min_quota_remaining: number
   weekly_reset_confirmation_required: boolean
+  rotation_policy_default: RotationPolicy
+  rotation_policy_by_agent: Record<string, RotationPolicy>
+  rotation_policy_by_machine: Record<string, RotationPolicy>
 }
 
 type SettingsResponse = {
@@ -442,6 +447,9 @@ const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   exhausted_utilization_percent: 100,
   min_quota_remaining: 10000,
   weekly_reset_confirmation_required: true,
+  rotation_policy_default: 'replacement_required_only',
+  rotation_policy_by_agent: {},
+  rotation_policy_by_machine: {},
 }
 const RANGE_LABELS: Record<RangeKey, string> = {
   '1d': 'Today',
@@ -672,6 +680,7 @@ function App() {
   const [actionApiKey, setActionApiKey] = useState('')
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
+  const [leaseSettingsModalOpen, setLeaseSettingsModalOpen] = useState(false)
   const [privacyMode, setPrivacyMode] = useState(false)
   const [managerSettings, setManagerSettings] = useState<RuntimeSettings>(DEFAULT_RUNTIME_SETTINGS)
   const [settingsLoading, setSettingsLoading] = useState(false)
@@ -782,10 +791,21 @@ function App() {
   const weeklyUtilizationSeries = selectedRange === '1d'
     ? (usageHistory?.series.hourly_weekly_utilization || [])
     : (usageHistory?.series.daily_weekly_utilization || [])
+  const modeledHourlyUsageSeries = selectedRange === '1d'
+    ? (usageHistory?.series.hourly_weekly_utilization || []).map((point) => ({
+        t: point.t,
+        value: Number(point.value || 0),
+        consumed: Number(point.value || 0),
+      }))
+    : []
   const statsFallbackMode = Boolean(usageHistory?.summary.fallback_mode)
   const statsModeledFallback = Boolean(statsFallbackMode && usageHistory?.summary.modeled_usage_basis)
   const statsPrimarySeries = statsModeledFallback
-    ? (statsChartMode === 'daily' ? statsDaily : statsCumulative)
+    ? (
+        selectedRange === '1d' && statsChartMode === 'daily'
+          ? modeledHourlyUsageSeries
+          : (statsChartMode === 'daily' ? statsDaily : statsCumulative)
+      )
     : (statsFallbackMode
         ? weeklyUtilizationSeries
         : (statsChartMode === 'daily' ? statsDaily : statsCumulative))
@@ -1127,6 +1147,225 @@ function App() {
   const updateManagerSetting = <K extends keyof RuntimeSettings>(key: K, value: RuntimeSettings[K]) => {
     setManagerSettings((current) => ({ ...current, [key]: value }))
   }
+
+  const updateRotationPolicyOverride = (
+    scope: 'rotation_policy_by_agent' | 'rotation_policy_by_machine',
+    key: string,
+    value: RotationPolicy,
+  ) => {
+    setManagerSettings((current) => ({
+      ...current,
+      [scope]: {
+        ...(current[scope] || {}),
+        [key]: value,
+      },
+    }))
+  }
+
+  const removeRotationPolicyOverride = (
+    scope: 'rotation_policy_by_agent' | 'rotation_policy_by_machine',
+    key: string,
+  ) => {
+    setManagerSettings((current) => {
+      const next = { ...(current[scope] || {}) }
+      delete next[key]
+      return {
+        ...current,
+        [scope]: next,
+      }
+    })
+  }
+
+  const renderLeaseSettingsEditor = () => (
+    <>
+      <div className="settings-grid">
+        <label className="settings-field">
+          <span>Client-Initiated Rotation</span>
+          <input
+            type="checkbox"
+            checked={managerSettings.allow_client_initiated_rotation}
+            onChange={(e) => updateManagerSetting('allow_client_initiated_rotation', e.target.checked)}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Lease TTL (seconds)</span>
+          <input
+            type="number"
+            min={60}
+            value={managerSettings.lease_default_ttl_seconds}
+            onChange={(e) => updateManagerSetting('lease_default_ttl_seconds', Number(e.target.value || 60))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Renew If Remaining ≤ (seconds)</span>
+          <input
+            type="number"
+            min={15}
+            value={managerSettings.lease_renewal_min_remaining_seconds}
+            onChange={(e) => updateManagerSetting('lease_renewal_min_remaining_seconds', Number(e.target.value || 15))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Mark Stale After (seconds)</span>
+          <input
+            type="number"
+            min={15}
+            value={managerSettings.lease_stale_after_seconds}
+            onChange={(e) => updateManagerSetting('lease_stale_after_seconds', Number(e.target.value || 15))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Reclaim After (seconds)</span>
+          <input
+            type="number"
+            min={30}
+            value={managerSettings.lease_reclaim_after_seconds}
+            onChange={(e) => updateManagerSetting('lease_reclaim_after_seconds', Number(e.target.value || 30))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Rotation Threshold (%)</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={managerSettings.rotation_request_threshold_percent}
+            onChange={(e) => updateManagerSetting('rotation_request_threshold_percent', Number(e.target.value || 0))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Max Assignable Utilization (%)</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={managerSettings.max_assignable_utilization_percent}
+            onChange={(e) => updateManagerSetting('max_assignable_utilization_percent', Number(e.target.value || 0))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Exhausted At (%)</span>
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={managerSettings.exhausted_utilization_percent}
+            onChange={(e) => updateManagerSetting('exhausted_utilization_percent', Number(e.target.value || 0))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Minimum Quota Remaining</span>
+          <input
+            type="number"
+            min={0}
+            value={managerSettings.min_quota_remaining}
+            onChange={(e) => updateManagerSetting('min_quota_remaining', Number(e.target.value || 0))}
+          />
+        </label>
+        <label className="settings-field">
+          <span>Require Weekly Reset Confirmation</span>
+          <input
+            type="checkbox"
+            checked={managerSettings.weekly_reset_confirmation_required}
+            onChange={(e) => updateManagerSetting('weekly_reset_confirmation_required', e.target.checked)}
+          />
+        </label>
+      </div>
+      <div className="settings-section" style={{ marginTop: 12, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1 }}>
+          <div className="settings-title">Rotation Policy Default</div>
+          <div className="muted">Controls whether clients only rotate when replacement is required, or also when rotation is recommended.</div>
+        </div>
+        <select
+          value={managerSettings.rotation_policy_default}
+          onChange={(e) => updateManagerSetting('rotation_policy_default', e.target.value as RotationPolicy)}
+          className="settings-select"
+        >
+          <option value="replacement_required_only">Replacement Required Only</option>
+          <option value="recommended_or_required">Recommended Or Required</option>
+        </select>
+      </div>
+      <div className="settings-section" style={{ marginTop: 12, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1 }}>
+          <div className="settings-title">Per Extension Type Policy</div>
+          <div className="muted">Override rotation policy by agent or extension type.</div>
+          <div className="settings-override-list">
+            {Object.entries(managerSettings.rotation_policy_by_agent).length ? Object.entries(managerSettings.rotation_policy_by_agent).map(([key, value]) => (
+              <div className="settings-override-row" key={`agent-${key}`}>
+                <span className="mono">{key}</span>
+                <select value={value} onChange={(e) => updateRotationPolicyOverride('rotation_policy_by_agent', key, e.target.value as RotationPolicy)} className="settings-select">
+                  <option value="replacement_required_only">Replacement Required Only</option>
+                  <option value="recommended_or_required">Recommended Or Required</option>
+                </select>
+                <button className="btn btn-sm" onClick={() => removeRotationPolicyOverride('rotation_policy_by_agent', key)}>Remove</button>
+              </div>
+            )) : <div className="muted">No agent overrides configured.</div>}
+            {Array.from(new Set((leaseOverview?.connected_machines || []).flatMap((machine) => machine.agent_ids || [])))
+              .filter((agentId) => !(agentId in managerSettings.rotation_policy_by_agent))
+              .map((agentId) => (
+                <div className="settings-override-row" key={`agent-suggest-${agentId}`}>
+                  <span className="mono">{agentId}</span>
+                  <button className="btn btn-sm" onClick={() => updateRotationPolicyOverride('rotation_policy_by_agent', agentId, managerSettings.rotation_policy_default)}>Add Override</button>
+                </div>
+              ))}
+          </div>
+        </div>
+      </div>
+      <div className="settings-section" style={{ marginTop: 12, alignItems: 'flex-start' }}>
+        <div style={{ flex: 1 }}>
+          <div className="settings-title">Per Machine Policy</div>
+          <div className="muted">Override rotation policy for specific machines.</div>
+          <div className="settings-override-list">
+            {Object.entries(managerSettings.rotation_policy_by_machine).length ? Object.entries(managerSettings.rotation_policy_by_machine).map(([key, value]) => (
+              <div className="settings-override-row" key={`machine-${key}`}>
+                <span className="mono">{sensitiveText(key)}</span>
+                <select value={value} onChange={(e) => updateRotationPolicyOverride('rotation_policy_by_machine', key, e.target.value as RotationPolicy)} className="settings-select">
+                  <option value="replacement_required_only">Replacement Required Only</option>
+                  <option value="recommended_or_required">Recommended Or Required</option>
+                </select>
+                <button className="btn btn-sm" onClick={() => removeRotationPolicyOverride('rotation_policy_by_machine', key)}>Remove</button>
+              </div>
+            )) : <div className="muted">No machine overrides configured.</div>}
+            {(leaseOverview?.connected_machines || [])
+              .map((machine) => machine.machine_id)
+              .filter((machineId) => !(machineId in managerSettings.rotation_policy_by_machine))
+              .map((machineId) => (
+                <div className="settings-override-row" key={`machine-suggest-${machineId}`}>
+                  <span className="mono">{sensitiveText(machineId)}</span>
+                  <button className="btn btn-sm" onClick={() => updateRotationPolicyOverride('rotation_policy_by_machine', machineId, managerSettings.rotation_policy_default)}>Add Override</button>
+                </div>
+              ))}
+          </div>
+        </div>
+      </div>
+      <div className="top-actions" style={{ marginTop: 12 }}>
+        <button
+          className="btn primary"
+          disabled={settingsSaving}
+          onClick={() => void saveManagerSettings({
+            allow_client_initiated_rotation: managerSettings.allow_client_initiated_rotation,
+            lease_default_ttl_seconds: managerSettings.lease_default_ttl_seconds,
+            lease_renewal_min_remaining_seconds: managerSettings.lease_renewal_min_remaining_seconds,
+            lease_stale_after_seconds: managerSettings.lease_stale_after_seconds,
+            lease_reclaim_after_seconds: managerSettings.lease_reclaim_after_seconds,
+            rotation_request_threshold_percent: managerSettings.rotation_request_threshold_percent,
+            max_assignable_utilization_percent: managerSettings.max_assignable_utilization_percent,
+            exhausted_utilization_percent: managerSettings.exhausted_utilization_percent,
+            min_quota_remaining: managerSettings.min_quota_remaining,
+            weekly_reset_confirmation_required: managerSettings.weekly_reset_confirmation_required,
+            rotation_policy_default: managerSettings.rotation_policy_default,
+            rotation_policy_by_agent: managerSettings.rotation_policy_by_agent,
+            rotation_policy_by_machine: managerSettings.rotation_policy_by_machine,
+          })}
+        >
+          {settingsSaving ? 'Saving…' : 'Save Lease Policies'}
+        </button>
+        <div className="muted">
+          {hasActionApiKey ? 'Changes apply to broker decisions without restarting the app.' : 'Set an API key to edit lease policy.'}
+        </div>
+      </div>
+    </>
+  )
 
   const refreshNow = async () => {
     if (!apiKey.trim()) return
@@ -1826,7 +2065,9 @@ function App() {
           <div className="graph-container">
             <div className="graph-label">
               {statsModeledFallback
-                ? `${chartRangeLabel} Modeled Consumption`
+                ? (selectedRange === '1d' && statsChartMode === 'daily'
+                    ? `${chartRangeLabel} Modeled Consumption (10-Minute)`
+                    : `${chartRangeLabel} Modeled Consumption`)
                 : (statsFallbackMode
                   ? `${chartRangeLabel} Utilization Trend (Fallback)`
                   : (statsChartMode === 'cumulative'
@@ -1837,7 +2078,9 @@ function App() {
               <span className="legend-item">
                 <span className="legend-dot legend-dot-teal" />
                 {statsModeledFallback
-                  ? 'Usage line = normalized units reconstructed from utilization snapshots (100 per account)'
+                  ? (selectedRange === '1d' && statsChartMode === 'daily'
+                      ? 'Usage line = 10-minute normalized units reconstructed from utilization snapshots'
+                      : 'Usage line = normalized units reconstructed from utilization snapshots (100 per account)')
                   : (statsFallbackMode
                       ? 'Usage line = weekly utilization % from stored snapshots (absolute counters unavailable)'
                       : 'Usage line = consumed units (from lifetime deltas), not utilization %')}
@@ -1962,123 +2205,30 @@ function App() {
 
           <section className="panel">
             <div className="saved-head">
-              <h3>Lease Policies</h3>
+              <h3>Lease Settings</h3>
               <span className="pill">{hasActionApiKey ? 'Editable' : 'Read-only'}</span>
             </div>
-            <div className="settings-grid">
-              <label className="settings-field">
-                <span>Client-Initiated Rotation</span>
-                <input
-                  type="checkbox"
-                  checked={managerSettings.allow_client_initiated_rotation}
-                  onChange={(e) => updateManagerSetting('allow_client_initiated_rotation', e.target.checked)}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Lease TTL (seconds)</span>
-                <input
-                  type="number"
-                  min={60}
-                  value={managerSettings.lease_default_ttl_seconds}
-                  onChange={(e) => updateManagerSetting('lease_default_ttl_seconds', Number(e.target.value || 60))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Renew If Remaining ≤ (seconds)</span>
-                <input
-                  type="number"
-                  min={15}
-                  value={managerSettings.lease_renewal_min_remaining_seconds}
-                  onChange={(e) => updateManagerSetting('lease_renewal_min_remaining_seconds', Number(e.target.value || 15))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Mark Stale After (seconds)</span>
-                <input
-                  type="number"
-                  min={15}
-                  value={managerSettings.lease_stale_after_seconds}
-                  onChange={(e) => updateManagerSetting('lease_stale_after_seconds', Number(e.target.value || 15))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Reclaim After (seconds)</span>
-                <input
-                  type="number"
-                  min={30}
-                  value={managerSettings.lease_reclaim_after_seconds}
-                  onChange={(e) => updateManagerSetting('lease_reclaim_after_seconds', Number(e.target.value || 30))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Rotation Threshold (%)</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={managerSettings.rotation_request_threshold_percent}
-                  onChange={(e) => updateManagerSetting('rotation_request_threshold_percent', Number(e.target.value || 0))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Max Assignable Utilization (%)</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={managerSettings.max_assignable_utilization_percent}
-                  onChange={(e) => updateManagerSetting('max_assignable_utilization_percent', Number(e.target.value || 0))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Exhausted At (%)</span>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={managerSettings.exhausted_utilization_percent}
-                  onChange={(e) => updateManagerSetting('exhausted_utilization_percent', Number(e.target.value || 0))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Minimum Quota Remaining</span>
-                <input
-                  type="number"
-                  min={0}
-                  value={managerSettings.min_quota_remaining}
-                  onChange={(e) => updateManagerSetting('min_quota_remaining', Number(e.target.value || 0))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Require Weekly Reset Confirmation</span>
-                <input
-                  type="checkbox"
-                  checked={managerSettings.weekly_reset_confirmation_required}
-                  onChange={(e) => updateManagerSetting('weekly_reset_confirmation_required', e.target.checked)}
-                />
-              </label>
+            <div className="muted" style={{ marginBottom: 12 }}>
+              Broker policy is configured separately from general manager settings so lease behavior stays isolated and easier to manage.
+            </div>
+            <div className="cards">
+              <div>
+                <label>Default Rotation Policy</label>
+                <strong>{managerSettings.rotation_policy_default === 'recommended_or_required' ? 'Recommended Or Required' : 'Replacement Required Only'}</strong>
+              </div>
+              <div>
+                <label>Per Extension Overrides</label>
+                <strong>{Object.keys(managerSettings.rotation_policy_by_agent).length}</strong>
+              </div>
+              <div>
+                <label>Per Machine Overrides</label>
+                <strong>{Object.keys(managerSettings.rotation_policy_by_machine).length}</strong>
+              </div>
             </div>
             <div className="top-actions" style={{ marginTop: 12 }}>
-              <button
-                className="btn primary"
-                disabled={settingsSaving}
-                onClick={() => void saveManagerSettings({
-                  allow_client_initiated_rotation: managerSettings.allow_client_initiated_rotation,
-                  lease_default_ttl_seconds: managerSettings.lease_default_ttl_seconds,
-                  lease_renewal_min_remaining_seconds: managerSettings.lease_renewal_min_remaining_seconds,
-                  lease_stale_after_seconds: managerSettings.lease_stale_after_seconds,
-                  lease_reclaim_after_seconds: managerSettings.lease_reclaim_after_seconds,
-                  rotation_request_threshold_percent: managerSettings.rotation_request_threshold_percent,
-                  max_assignable_utilization_percent: managerSettings.max_assignable_utilization_percent,
-                  exhausted_utilization_percent: managerSettings.exhausted_utilization_percent,
-                  min_quota_remaining: managerSettings.min_quota_remaining,
-                  weekly_reset_confirmation_required: managerSettings.weekly_reset_confirmation_required,
-                })}
-              >
-                {settingsSaving ? 'Saving…' : 'Save Lease Policies'}
-              </button>
+              <button className="btn primary" onClick={() => setLeaseSettingsModalOpen(true)}>Open Lease Settings</button>
               <div className="muted">
-                {hasActionApiKey ? 'Changes apply to broker decisions without restarting the app.' : 'Set an API key to edit lease policy.'}
+                {hasActionApiKey ? 'Lease policies apply immediately to broker decisions.' : 'Set an API key to edit lease policy.'}
               </div>
             </div>
           </section>
@@ -2517,6 +2667,21 @@ function App() {
             <div className="muted" style={{ marginTop: 10 }}>
               {settingsLoading ? 'Loading manager settings…' : `Current snapshot interval: ${managerSettings.analytics_snapshot_interval_seconds}s`}
             </div>
+          </div>
+        </div>
+      ) : null}
+
+      {leaseSettingsModalOpen ? (
+        <div className="modal-overlay" onClick={() => setLeaseSettingsModalOpen(false)}>
+          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <h3>Lease Settings</h3>
+              <button className="btn btn-sm" onClick={() => setLeaseSettingsModalOpen(false)}>Close</button>
+            </div>
+            <div className="muted" style={{ marginBottom: 12 }}>
+              These settings control broker behavior globally, by extension type, and by individual machine.
+            </div>
+            {renderLeaseSettingsEditor()}
           </div>
         </div>
       ) : null}

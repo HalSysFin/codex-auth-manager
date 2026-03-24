@@ -104,6 +104,23 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         <div id="healthPill" class="pill">No Lease</div>
       </div>
       <div id="accountName" class="accountName">No Lease</div>
+      <div class="tabs">
+        <button class="tab active" data-tab="summary" id="tabSummary" type="button">Usage</button>
+        <button class="tab" data-tab="details" id="tabDetails" type="button">Lease Info</button>
+      </div>
+      <div id="summaryPanel" class="panel active">
+        <div class="usage-card">
+          <label>Current Usage</label>
+          <div class="usage-row">
+            <strong id="usageValue">--</strong>
+            <span id="usagePercent" class="usage-percent">--</span>
+          </div>
+          <div class="usage-track">
+            <div id="usageBar" class="usage-bar"></div>
+          </div>
+          <div id="usageMeta" class="usage-meta">No lease data yet.</div>
+        </div>
+      </div>
       <div class="actions">
         <button data-command="refresh">Refresh</button>
         <button data-command="renew">Renew</button>
@@ -115,10 +132,21 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         <button data-command="reloadWindow">Reload Window</button>
       </div>
       <div id="message" class="message"></div>
-      <div class="grid" id="details"></div>
+      <div class="panel" id="detailsPanel">
+        <div class="grid" id="details"></div>
+      </div>
     </div>
     <script>
       const vscode = acquireVsCodeApi();
+      document.querySelectorAll('[data-tab]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const tab = button.getAttribute('data-tab');
+          document.querySelectorAll('[data-tab]').forEach((el) => el.classList.remove('active'));
+          button.classList.add('active');
+          document.getElementById('summaryPanel').classList.toggle('active', tab === 'summary');
+          document.getElementById('detailsPanel').classList.toggle('active', tab === 'details');
+        });
+      });
       document.querySelectorAll('[data-command]').forEach((button) => {
         button.addEventListener('click', () => {
           vscode.postMessage({ command: button.getAttribute('data-command') });
@@ -135,6 +163,10 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         const accountName = document.getElementById('accountName');
         const details = document.getElementById('details');
         const message = document.getElementById('message');
+        const usageValue = document.getElementById('usageValue');
+        const usagePercent = document.getElementById('usagePercent');
+        const usageBar = document.getElementById('usageBar');
+        const usageMeta = document.getElementById('usageMeta');
         const state = payload.state;
         const titleMap = {
           active: 'Active',
@@ -149,6 +181,19 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
         accountName.textContent = state.accountLabel || state.accountName || state.credentialId || 'No Lease';
         message.textContent = payload.lastMessage || '';
         message.style.display = payload.lastMessage ? 'block' : 'none';
+        const pct = typeof state.latestUtilizationPct === 'number' && Number.isFinite(state.latestUtilizationPct)
+          ? Math.max(0, Math.min(100, state.latestUtilizationPct))
+          : null;
+        usageValue.textContent = pct === null ? '-- / 100' : String(Math.round(pct)) + ' / 100';
+        usagePercent.textContent = pct === null ? '--' : String(Math.round(pct)) + '%';
+        usageBar.style.width = pct === null ? '0%' : String(pct) + '%';
+        usageBar.className = 'usage-bar ' + (pct === null ? 'unknown' : (pct >= 85 ? 'danger' : (pct >= 60 ? 'warn' : 'ok')));
+        const remaining = state.latestQuotaRemaining == null && pct !== null
+          ? Math.max(0, Math.round(100 - pct))
+          : state.latestQuotaRemaining;
+        usageMeta.textContent = remaining == null
+          ? 'Remaining quota unavailable.'
+          : ('Remaining quota: ' + String(remaining));
         const rows = [
           ['Account', state.accountLabel || state.accountName || state.credentialId],
           ['Lease State', state.leaseState],
@@ -157,12 +202,9 @@ export class LeaseWebviewProvider implements vscode.WebviewViewProvider {
           ['Issued At', state.issuedAt],
           ['Expires At', state.expiresAt],
           ['Latest Utilization %', state.latestUtilizationPct],
-          ['Latest Quota Remaining', state.latestQuotaRemaining],
           ['Latest Telemetry At', state.latestTelemetryAt],
           ['Last Auth File Write', state.lastAuthWriteAt],
           ['Last Backend Refresh', state.lastBackendRefreshAt],
-          ['Replacement Required', state.replacementRequired],
-          ['Rotation Recommended', state.rotationRecommended],
           ['Machine Id', state.machineId],
           ['Agent Id', state.agentId],
           ['Backend Base URL', payload.baseUrl],

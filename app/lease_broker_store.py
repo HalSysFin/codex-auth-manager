@@ -52,6 +52,25 @@ def _runtime_float(key: str, default: float) -> float:
     return float(_runtime_value(key, default))
 
 
+
+
+def _effective_rotation_policy(machine_id: str, agent_id: str) -> str:
+    runtime = get_runtime_settings()
+    machine_overrides = runtime.get("rotation_policy_by_machine") or {}
+    if isinstance(machine_overrides, dict):
+        machine_policy = str(machine_overrides.get(machine_id) or "").strip()
+        if machine_policy in {"replacement_required_only", "recommended_or_required"}:
+            return machine_policy
+    agent_overrides = runtime.get("rotation_policy_by_agent") or {}
+    if isinstance(agent_overrides, dict):
+        agent_policy = str(agent_overrides.get(agent_id) or "").strip()
+        if agent_policy in {"replacement_required_only", "recommended_or_required"}:
+            return agent_policy
+    default_policy = str(runtime.get("rotation_policy_default") or "").strip()
+    if default_policy in {"replacement_required_only", "recommended_or_required"}:
+        return default_policy
+    return "replacement_required_only"
+
 def initialize_lease_broker_store(db_path: Path | None = None) -> None:
     with _connect(db_path) as conn:
         _ensure_schema(conn)
@@ -999,6 +1018,7 @@ def get_broker_lease_status(
             or lease["state"] in {"rotation_required", "revoked", "expired"}
         )
         seconds_since_seen = _lease_seconds_since_seen(lease, now_dt)
+        effective_rotation_policy = _effective_rotation_policy(str(lease["machine_id"]), str(lease["agent_id"]))
         return {
             "lease_id": lease["id"],
             "credential_id": lease["credential_id"],
@@ -1017,6 +1037,7 @@ def get_broker_lease_status(
             "replacement_required": replacement_required,
             "reason": lease["reason"],
             "credential_state": credential["state"],
+            "effective_rotation_policy": effective_rotation_policy,
             "last_seen_at": lease.get("last_seen_at"),
             "seconds_since_seen": seconds_since_seen,
             "is_stale": seconds_since_seen is not None and seconds_since_seen >= _runtime_int("lease_stale_after_seconds", settings.lease_stale_after_seconds),

@@ -79,11 +79,9 @@ If your backend does not yet support `POST /api/leases/{lease_id}/materialize`, 
 - `authManager.telemetryIntervalSeconds`
 - `authManager.autoRenew`
 - `authManager.autoRotate`
-- `authManager.rotationPolicy` (`replacement_required_only` or `recommended_or_required`)
-- `authManager.openDashboardPath`
 - `authManager.allowInsecureLocalhost`
 
-If `machineId` or `agentId` are blank, the extension generates stable defaults and persists them in extension global state.
+If `machineId` or `agentId` are blank, the extension generates stable defaults and persists them in extension global state. Rotation policy is controlled by Auth Manager.
 
 Backend auth is always sent as:
 

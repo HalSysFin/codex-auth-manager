@@ -157,3 +157,26 @@ body{margin:0;background:#0a0a0a;color:#ededed;font-family:Inter,system-ui,sans-
   .token-row{grid-template-columns:1fr 1fr}
   .token-row input{grid-column:1 / -1}
 }
+
+.settings-select {
+  min-width: 240px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 10px 12px;
+}
+
+.settings-override-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.settings-override-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}

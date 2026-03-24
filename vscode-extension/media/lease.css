@@ -27,6 +27,23 @@ h1 {
   font-weight: 600;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-foreground);
+}
+
+.tab.active {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
 .pill {
   border-radius: 999px;
   padding: 4px 10px;
@@ -83,6 +100,84 @@ button:hover {
   border-radius: 8px;
   background: rgba(59, 130, 246, 0.15);
   display: none;
+}
+
+.panel {
+  display: none;
+}
+
+.panel.active {
+  display: block;
+}
+
+.usage-card {
+  margin-top: 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.usage-card label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+.usage-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.usage-row strong {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.usage-percent {
+  font-size: 18px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.usage-track {
+  margin-top: 12px;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--vscode-panel-border);
+}
+
+.usage-bar {
+  height: 100%;
+  width: 0%;
+  transition: width 120ms ease;
+}
+
+.usage-bar.ok {
+  background: #10b981;
+}
+
+.usage-bar.warn {
+  background: #f59e0b;
+}
+
+.usage-bar.danger {
+  background: #ef4444;
+}
+
+.usage-bar.unknown {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+.usage-meta {
+  margin-top: 10px;
+  opacity: 0.8;
 }
 
 .grid {
