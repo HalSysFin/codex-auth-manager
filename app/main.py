@@ -118,7 +118,15 @@ from .login_sessions import (
     validate_relay_token,
 )
 
-app = FastAPI(title="Codex Auth Manager", version="0.2.0")
+APP_VERSION = "1.2.1"
+GITHUB_REPO = "HalSysFin/Codex-Auth-Manager"
+_VERSION_CHECK_CACHE: dict[str, Any] = {
+    "checked_at": None,
+    "payload": None,
+}
+_VERSION_CHECK_CACHE_TTL_SECONDS = 3600
+
+app = FastAPI(title="Codex Auth Manager", version=APP_VERSION)
 logger = logging.getLogger(__name__)
 _LEASE_RECONCILE_INTERVAL_SECONDS = 15
 _LIVE_REFRESH_CONCURRENCY = 4
@@ -2087,6 +2095,18 @@ async def api_usage_history(request: Request, range: str = "30d") -> JSONRespons
     current_total_used = int(aggregate_summary["total_current_window_used"] or 0)
     current_total_limit = int(aggregate_summary["total_current_window_limit"] or 0)
     current_total_remaining = int(aggregate_summary["total_remaining"] or 0)
+    active_account_count = len(cached["accounts"])
+    normalized_pool_limit = active_account_count * 100 if active_account_count > 0 else 0
+    normalized_pool_used = (
+        round(sum(live_weekly_percents), 2)
+        if live_weekly_percents
+        else (round(float(weekly_utilization_now or 0) * active_account_count, 2) if active_account_count > 0 else 0.0)
+    )
+    normalized_pool_remaining = (
+        round(max(normalized_pool_limit - normalized_pool_used, 0.0), 2)
+        if normalized_pool_limit > 0
+        else 0.0
+    )
     absolute_snapshot_available = any(
         any(int(row.get(field) or 0) > 0 for field in ("usage_in_window", "usage_limit", "lifetime_used"))
         for row in snapshots
@@ -2149,9 +2169,9 @@ async def api_usage_history(request: Request, range: str = "30d") -> JSONRespons
         ]
         top_accounts_available = True
     else:
-        current_total_used_value = current_total_used
-        current_total_limit_value = current_total_limit
-        current_total_remaining_value = current_total_remaining
+        current_total_used_value = normalized_pool_used
+        current_total_limit_value = normalized_pool_limit
+        current_total_remaining_value = normalized_pool_remaining
         top_accounts_payload = [
             {
                 "account_key": account_key,
@@ -2295,6 +2315,63 @@ async def api_openclaw_usage_by_credential(request: Request, range: str = "30d")
             "rows": payload_rows,
         }
     )
+
+
+@app.get("/api/app/version")
+async def api_app_version(request: Request) -> JSONResponse:
+    _require_internal_auth(request)
+    now = datetime.now(timezone.utc)
+    checked_at = _VERSION_CHECK_CACHE.get("checked_at")
+    cached_payload = _VERSION_CHECK_CACHE.get("payload")
+    if (
+        isinstance(checked_at, datetime)
+        and cached_payload is not None
+        and (now - checked_at).total_seconds() < _VERSION_CHECK_CACHE_TTL_SECONDS
+    ):
+        return JSONResponse(cached_payload)
+
+    latest_tag: str | None = None
+    latest_name: str | None = None
+    latest_url: str | None = None
+    update_available = False
+    error: str | None = None
+
+    try:
+        async with asyncio.timeout(3.0):
+            async with httpx.AsyncClient(timeout=3.0, follow_redirects=True, trust_env=False) as client:
+                response = await client.get(
+                    f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                    headers={
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                        "User-Agent": "codex-auth-manager-version-check",
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        latest_tag = str(payload.get("tag_name") or "").strip() or None
+        latest_name = str(payload.get("name") or "").strip() or None
+        latest_url = str(payload.get("html_url") or "").strip() or None
+        if latest_tag:
+            current_key = APP_VERSION.lstrip("vV")
+            latest_key = latest_tag.lstrip("vV")
+            update_available = latest_key != current_key
+    except Exception as exc:
+        logger.warning("version_check_failed %s", exc)
+        error = str(exc)
+
+    response_payload = {
+        "current_version": APP_VERSION,
+        "repo": GITHUB_REPO,
+        "latest_version": latest_tag,
+        "latest_name": latest_name,
+        "latest_url": latest_url,
+        "update_available": update_available,
+        "error": error,
+    }
+    _VERSION_CHECK_CACHE["checked_at"] = now
+    _VERSION_CHECK_CACHE["payload"] = response_payload
+    return JSONResponse(response_payload)
 
 
 @app.get("/api/accounts/{label}/history")

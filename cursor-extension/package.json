@@ -1,0 +1,186 @@
+{
+  "name": "cam-cursor-extension",
+  "displayName": "CAM Cursor Extension",
+  "description": "Connects Cursor to Codex Auth Manager leases and writes leased auth payloads into ~/.codex/auth.json.",
+  "version": "1.12.4",
+  "publisher": "halsysfin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HalSysFin/codex-auth-manager.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:authManager.ensureLease",
+    "onCommand:authManager.refreshLease",
+    "onCommand:authManager.requestNewLease",
+    "onCommand:authManager.rotateLease",
+    "onCommand:authManager.releaseLease",
+    "onCommand:authManager.reloadCodexAuth",
+    "onCommand:authManager.reloadWindow",
+    "onCommand:authManager.openDashboard",
+    "onCommand:authManager.showLeaseView",
+    "onView:authManager.leaseView"
+  ],
+  "main": "./dist/cursor-extension/src/extension.js",
+  "files": [
+    "dist/cursor-extension/**",
+    "dist/packages/**",
+    "media/**",
+    "package.json",
+    "README.md",
+    "FIRST_TIME_SETUP.md",
+    "LICENSE"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "authManager.ensureLease",
+        "title": "Auth Manager: Ensure Lease"
+      },
+      {
+        "command": "authManager.refreshLease",
+        "title": "Auth Manager: Refresh Lease"
+      },
+      {
+        "command": "authManager.requestNewLease",
+        "title": "Auth Manager: Request New Auth Lease"
+      },
+      {
+        "command": "authManager.rotateLease",
+        "title": "Auth Manager: Rotate Lease"
+      },
+      {
+        "command": "authManager.releaseLease",
+        "title": "Auth Manager: Release Lease"
+      },
+      {
+        "command": "authManager.reloadCodexAuth",
+        "title": "Auth Manager: Reload Codex Auth"
+      },
+      {
+        "command": "authManager.reloadWindow",
+        "title": "Auth Manager: Reload Window"
+      },
+      {
+        "command": "authManager.openDashboard",
+        "title": "Auth Manager: Open Dashboard"
+      },
+      {
+        "command": "authManager.showLeaseView",
+        "title": "Auth Manager: Show Lease View"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "authManager",
+          "title": "CAM Cursor",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "authManager": [
+        {
+          "id": "authManager.leaseView",
+          "name": "CAM Cursor Extension",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CAM Cursor Extension",
+      "properties": {
+        "authManager.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "description": "Base URL for the Auth Manager backend."
+        },
+        "authManager.internalApiToken": {
+          "type": "string",
+          "default": "",
+          "description": "Bearer token used to authenticate with the Auth Manager backend."
+        },
+        "authManager.machineId": {
+          "type": "string",
+          "default": "",
+          "description": "Stable machine identifier for lease ownership. Leave blank to let the extension persist a generated value."
+        },
+        "authManager.agentId": {
+          "type": "string",
+          "default": "",
+          "description": "Stable agent identifier for lease ownership. Leave blank to let the extension persist a generated value."
+        },
+        "authManager.authFilePath": {
+          "type": "string",
+          "default": "~/.codex/auth.json",
+          "description": "Path to the active Codex auth file."
+        },
+        "authManager.refreshIntervalSeconds": {
+          "type": "number",
+          "default": 60,
+          "minimum": 15,
+          "description": "How often the extension refreshes the current lease state."
+        },
+        "authManager.telemetryIntervalSeconds": {
+          "type": "number",
+          "default": 300,
+          "minimum": 60,
+          "description": "How often the extension posts lightweight lease telemetry."
+        },
+        "authManager.autoRenew": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically renew leases that are close to expiry."
+        },
+        "authManager.autoRotate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically rotate leases when replacement is required."
+        },
+        "authManager.autoReloadWindowOnLeaseChange": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically reload the VS Code window after a lease is replaced and auth.json is rewritten (preserves the same workspace/remote)."
+        },
+        "authManager.releaseLeaseOnShutdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Best-effort release of the current lease when VS Code shuts down."
+        },
+        "authManager.deleteAuthFileOnShutdown": {
+          "type": "boolean",
+          "default": true,
+          "description": "Delete authManager.authFilePath when VS Code shuts down."
+        },
+        "authManager.allowInsecureLocalhost": {
+          "type": "boolean",
+          "default": true,
+          "description": "Allow plain HTTP when the backend is on localhost during local development."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w",
+    "lint": "tsc -p . --noEmit",
+    "test": "node --import tsx --test \"src/test/**/*.test.ts\"",
+    "prepublishOnly": "npm run compile",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.2.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

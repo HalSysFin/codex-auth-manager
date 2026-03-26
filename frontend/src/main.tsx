@@ -94,6 +94,16 @@ type OpenClawExportData = {
   authJson: string
 }
 
+type AppVersionResponse = {
+  current_version: string
+  repo: string
+  latest_version?: string | null
+  latest_name?: string | null
+  latest_url?: string | null
+  update_available: boolean
+  error?: string | null
+}
+
 type LoginStatusResponse = {
   status?: string
   callback_received?: boolean
@@ -942,6 +952,7 @@ function App() {
   const [historyData, setHistoryData] = useState<AccountHistoryResponse | null>(null)
   const [usageHistory, setUsageHistory] = useState<UsageHistoryResponse | null>(null)
   const [openClawCredentialUsage, setOpenClawCredentialUsage] = useState<OpenClawCredentialUsageResponse | null>(null)
+  const [appVersion, setAppVersion] = useState<AppVersionResponse | null>(null)
   const [accountSort, setAccountSort] = useState<AccountSortKey>('consumption_asc')
   const [selectedRange, setSelectedRange] = useState<RangeKey>('30d')
   const [statsChartMode, setStatsChartMode] = useState<'cumulative' | 'daily'>('cumulative')
@@ -1221,6 +1232,15 @@ function App() {
       setErr(e instanceof Error ? e.message : 'Failed to save settings')
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  const loadAppVersion = async (token: string) => {
+    try {
+      const payload = await requestJson<AppVersionResponse>('/api/app/version', token)
+      setAppVersion(payload)
+    } catch {
+      setAppVersion(null)
     }
   }
 
@@ -2032,6 +2052,7 @@ function App() {
       .then(async () => {
         await loadUsageHistory(apiKey, selectedRange)
         await loadOpenClawCredentialUsage(apiKey, selectedRange)
+        await loadAppVersion(apiKey)
         startStream(apiKey)
       })
       .catch((e: unknown) => {
@@ -2145,6 +2166,24 @@ function App() {
       </header>
 
       {err ? <div className="error panel">{err}</div> : null}
+      {appVersion?.update_available && appVersion.latest_version ? (
+        <div className="fallback-banner">
+          New version available: {appVersion.latest_name || appVersion.latest_version} (current {appVersion.current_version})
+          {appVersion.latest_url ? (
+            <>
+              {' '}
+              <a
+                href={appVersion.latest_url}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: '#fcd34d', textDecoration: 'underline' }}
+              >
+                View release
+              </a>
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       {mode === 'manager' ? (
         <>
