@@ -1,40 +1,29 @@
 # Codex Auth Manager VS Code Extension
 
-This extension lets VS Code participate directly in the Auth Manager lease broker flow.
+This extension connects VS Code directly to Codex Auth Manager so the editor can run on a managed lease and keep the local Codex auth file aligned with the active leased account.
 
-What it does:
+## What It Does
 
-- ensures the local machine has an Auth Manager lease
-- refreshes and renews the lease in the background
-- rotates or reacquires when the lease is no longer usable
+- acquires or reuses a lease for the current VS Code machine context
 - materializes the leased auth payload into `~/.codex/auth.json`
-- posts lightweight lease telemetry back to Auth Manager
-- shows current lease status in a sidebar view and a right-aligned status bar that includes the current account label when known
+- refreshes and renews the lease in the background
+- rotates or reacquires when the active lease is no longer usable
+- posts lightweight lease telemetry back to Codex Auth Manager
+- shows current lease and account state in the activity bar view and status bar
+- supports Remote SSH / remote workspace identity so different remote hosts do not collapse into one machine
 
-## Shared runtime
+## How It Works
 
-The VS Code extension now uses the same shared lease runtime as the desktop app and headless client:
+On startup the extension:
 
-- `packages/lease-runtime/`
+1. resolves machine and agent identity
+2. loads persisted lease state for that identity
+3. acquires or refreshes the current lease
+4. materializes the leased auth payload
+5. writes the active auth to the local Codex auth file
+6. starts background refresh and telemetry timers
 
-That shared runtime provides:
-
-- typed Auth Manager client calls
-- lease lifecycle decisions
-- runtime lease-state helpers
-- telemetry payload shaping
-- auth payload validation helpers
-
-The extension keeps VS Code-specific concerns local:
-
-- commands
-- webview and status bar UI
-- extension globalState persistence
-- filesystem writes for the active auth file
-
-## Expected backend support
-
-The extension expects these Auth Manager endpoints:
+The extension expects these manager endpoints:
 
 - `POST /api/leases/acquire`
 - `GET /api/leases/{lease_id}`
@@ -44,31 +33,15 @@ The extension expects these Auth Manager endpoints:
 - `POST /api/leases/rotate`
 - `POST /api/leases/{lease_id}/materialize`
 
-The materialize response is expected to include:
+Manager auth is sent as:
 
-```json
-{
-  "status": "ok",
-  "lease": { "...": "..." },
-  "credential_material": {
-    "auth_json": {
-      "auth_mode": "string",
-      "OPENAI_API_KEY": null,
-      "tokens": {
-        "id_token": "string",
-        "access_token": "string",
-        "refresh_token": "string",
-        "account_id": "string"
-      },
-      "last_refresh": "string"
-    }
-  }
-}
+```http
+Authorization: Bearer <authManager.internalApiToken>
 ```
 
-If your backend does not yet support `POST /api/leases/{lease_id}/materialize`, that is the required contract addition for end-to-end auth delivery.
+## Settings
 
-## Extension settings
+The shipped extension settings are:
 
 - `authManager.baseUrl`
 - `authManager.internalApiToken`
@@ -79,38 +52,49 @@ If your backend does not yet support `POST /api/leases/{lease_id}/materialize`, 
 - `authManager.telemetryIntervalSeconds`
 - `authManager.autoRenew`
 - `authManager.autoRotate`
+- `authManager.autoReloadWindowOnLeaseChange`
+- `authManager.releaseLeaseOnShutdown`
+- `authManager.deleteAuthFileOnShutdown`
 - `authManager.allowInsecureLocalhost`
 
-If `machineId` or `agentId` are blank, the extension generates stable defaults and persists them in extension global state. Rotation policy is controlled by Auth Manager.
+Defaults worth knowing:
 
-Backend auth is always sent as:
+- `authManager.baseUrl = http://127.0.0.1:8080`
+- `authManager.authFilePath = ~/.codex/auth.json`
+- `authManager.autoRenew = true`
+- `authManager.autoRotate = true`
+- `authManager.releaseLeaseOnShutdown = true`
+- `authManager.deleteAuthFileOnShutdown = true`
 
-```http
-Authorization: Bearer <authManager.internalApiToken>
-```
+Notes:
+
+- leave `authManager.machineId` blank unless you intentionally want to override the derived machine identity
+- leave `authManager.agentId` blank unless you intentionally want to override the default agent identity
+- on Remote SSH, the extension includes remote host context in the machine identity so different SSH targets stay distinct
+- effective rotation policy comes from the manager lease status response
 
 ## Commands
 
-- `authManager.ensureLease`
-- `authManager.refreshLease`
-- `authManager.requestNewLease`
-- `authManager.rotateLease`
-- `authManager.releaseLease`
-- `authManager.reloadCodexAuth`
-- `authManager.reloadWindow`
-- `authManager.openDashboard`
-- `authManager.showLeaseView`
+The extension contributes these commands:
 
-`authManager.requestNewLease` is a manual fresh-lease action. It does not renew the current lease. Instead, the extension releases the current lease when possible, acquires a new lease from the broker, materializes the new auth payload, and rewrites `~/.codex/auth.json`.
+- `Auth Manager: Ensure Lease`
+- `Auth Manager: Refresh Lease`
+- `Auth Manager: Request New Auth Lease`
+- `Auth Manager: Rotate Lease`
+- `Auth Manager: Release Lease`
+- `Auth Manager: Reload Codex Auth`
+- `Auth Manager: Reload Window`
+- `Auth Manager: Open Dashboard`
+- `Auth Manager: Show Lease View`
 
-The status bar uses the best available account identity in this order:
+Practical command behavior:
 
-1. `credential_material.label`
-2. `credential_material.name`
-3. `lease.metadata.label`
-4. `credential_id`
+- `Request New Auth Lease` requests a fresh lease instead of renewing the current one
+- `Reload Codex Auth` rewrites the local auth file from the current active lease state
+- `Reload Window` is available as a manual fallback after auth replacement
+- `Open Dashboard` opens the manager UI
 
-## Auth file behavior
+## Auth File Behavior
 
 The extension writes the leased auth payload to `~/.codex/auth.json` by default.
 
@@ -118,57 +102,50 @@ It writes atomically:
 
 1. expands `~`
 2. creates parent directories if needed
-3. writes to a temp file
+3. writes a temp file
 4. fsyncs the temp file
 5. renames it into place
 
-The extension does not keep the full auth payload in extension state unless the backend sends it during a live materialization request.
+The extension does not persist the full auth payload into extension state. The manager remains the source of truth and the auth payload is only handled when materialized.
 
-## Lease lifecycle behavior
+## Lease Lifecycle
 
-- Startup:
-  - load persisted lease metadata
-  - if no lease exists, acquire one
-  - materialize auth payload and write auth file
-  - if a lease exists, refresh it from the backend
-- Background:
-  - refresh lease status every `authManager.refreshIntervalSeconds`
-  - post telemetry every `authManager.telemetryIntervalSeconds`
-- Rotation / expiry:
-  - rotate when replacement is required or recommended and auto-rotate is enabled
-  - renew when close to expiry and auto-renew is enabled
-  - reacquire when the lease is revoked or expired
-  - reacquire when the backend reports the stored lease no longer exists
+Normal lifecycle:
 
-## Local development
+- startup: acquire or recover the lease and materialize auth
+- background: refresh lease status and post telemetry on intervals
+- renewal: renew when lease expiry approaches and auto-renew is enabled
+- replacement: rotate or reacquire when the manager reports replacement is required or the lease becomes invalid
+- shutdown: best-effort release and auth file cleanup when those settings are enabled
 
-From the repo root:
+## UI
+
+The extension provides:
+
+- an activity bar view for lease status and manual actions
+- a status bar entry showing current account / lease state
+- a compact usage-focused panel with a separate lease info tab
+
+The default panel is intentionally concise. Detailed lease metadata lives in the lease info tab instead of the main usage view.
+
+## Local Development
 
 ```bash
 cd vscode-extension
 npm install
 npm run compile
-```
-
-To run tests:
-
-```bash
-cd vscode-extension
 npm test
 ```
 
-To package:
+To package a VSIX:
 
 ```bash
 cd vscode-extension
 npm run package
 ```
 
-Then open the repo in VS Code and launch the extension in an Extension Development Host.
+## Limitations
 
-## Known limitations
-
-- The extension does not run a separate local daemon in v1.
-- Telemetry is intentionally lightweight and does not invent token/request counts.
-- The extension does not force-restart VS Code. It offers a reload command instead.
-- The extension assumes the backend is the source of truth for lease validity and replacement requirements.
+- telemetry is intentionally lightweight; it does not invent token counts
+- the extension depends on the manager being the source of truth for lease validity and materialized auth
+- the extension can only do best-effort cleanup on shutdown; hard kills and crashes can skip deactivation logic
