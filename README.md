@@ -30,6 +30,8 @@ This repo now contains several clients around the same Auth Manager backend and 
   Chrome extension for localhost callback capture and relay into Auth Manager during browser-based login flows.
 - `vscode-extension/`
   VS Code extension that acquires broker leases, materializes auth into `~/.codex/auth.json`, and keeps the lease healthy inside VS Code.
+- `antigravity-extension/`
+  Antigravity-targeted VSIX package built on the same lease-backed extension flow for Google's VS Code fork.
 - `desktop-app/`
   Tauri desktop app for Linux/Windows that performs the same broker-backed auth lifecycle without depending on VS Code.
 - `headless-client/`
