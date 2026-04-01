@@ -45,6 +45,7 @@ export function defaultRuntimeLeaseState(machineId: string, agentId: string, aut
     latestQuotaRemaining: null,
     credentialAuthUpdatedAt: null,
     lastAuthWriteAt: null,
+    lastAuthFingerprint: null,
     lastBackendRefreshAt: null,
     replacementRequired: false,
     rotationRecommended: false,
@@ -91,10 +92,11 @@ export function updateRuntimeStateFromLeaseStatus(state: RuntimeLeaseState, leas
   }
 }
 
-export function recordAuthWrite(state: RuntimeLeaseState, atIso: string): RuntimeLeaseState {
+export function recordAuthWrite(state: RuntimeLeaseState, atIso: string, fingerprint: string | null = null): RuntimeLeaseState {
   return {
     ...state,
     lastAuthWriteAt: atIso,
+    lastAuthFingerprint: fingerprint,
   }
 }
 

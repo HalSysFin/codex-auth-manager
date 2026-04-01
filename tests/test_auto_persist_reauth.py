@@ -9,8 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.accounts import AccountProfile
+from app.auth_store import AuthStoreSwitchResult
 from app.codex_cli import LoginStatusResult
-from app.codex_switch import CodexSwitchResult
 from app.login_sessions import LoginSession
 from app.main import _persist_current_auth_to_profile, auth_login_status
 
@@ -49,7 +49,7 @@ class AutoPersistReauthTests(unittest.TestCase):
             pid=123,
             error=None,
         )
-        switch_result = CodexSwitchResult(
+        switch_result = AuthStoreSwitchResult(
             command=["internal-save", "--label", "other"],
             returncode=0,
             stdout="ok",
@@ -65,7 +65,7 @@ class AutoPersistReauthTests(unittest.TestCase):
                 return_value={"email": "james@systemsfinance.co.uk", "tokens": {"access_token": "new"}},
             ),
             patch("app.main.list_profiles", return_value=[profile]),
-            patch("app.main.list_labels", return_value=["other"]),
+            patch("app.main.list_auth_labels", return_value=["other"]),
             patch("app.main.persist_current_auth"),
             patch("app.main._touch_account_usage"),
             patch("app.main.save_current_auth_under_label", return_value=switch_result) as save_mock,
@@ -123,7 +123,7 @@ class AutoPersistReauthTests(unittest.TestCase):
             access_token="old",
             email="james@systemsfinance.co.uk",
         )
-        switch_result = CodexSwitchResult(
+        switch_result = AuthStoreSwitchResult(
             command=["internal-save", "--label", "other"],
             returncode=0,
             stdout="ok",
@@ -136,7 +136,7 @@ class AutoPersistReauthTests(unittest.TestCase):
                 return_value={"email": "james@systemsfinance.co.uk", "tokens": {"access_token": "new"}},
             ),
             patch("app.main.list_profiles", return_value=[profile]),
-            patch("app.main.list_labels", return_value=["other"]),
+            patch("app.main.list_auth_labels", return_value=["other"]),
             patch("app.main.persist_current_auth"),
             patch("app.main._touch_account_usage"),
             patch("app.main.save_current_auth_under_label", return_value=switch_result) as save_mock,
@@ -167,7 +167,7 @@ class AutoPersistReauthTests(unittest.TestCase):
             access_token="new",
             email="james@systemsfinance.co.uk",
         )
-        switch_result = CodexSwitchResult(
+        switch_result = AuthStoreSwitchResult(
             command=["internal-save", "--label", "other"],
             returncode=0,
             stdout="ok",
@@ -177,7 +177,7 @@ class AutoPersistReauthTests(unittest.TestCase):
         with (
             patch("app.main.read_current_auth", return_value=new_auth),
             patch("app.main.list_profiles", side_effect=[[old_profile], [updated_profile]]),
-            patch("app.main.list_labels", return_value=["other"]),
+            patch("app.main.list_auth_labels", return_value=["other"]),
             patch("app.main.persist_current_auth"),
             patch("app.main._touch_account_usage"),
             patch("app.main.save_current_auth_under_label", return_value=switch_result) as save_mock,
@@ -191,7 +191,7 @@ class AutoPersistReauthTests(unittest.TestCase):
         self.assertEqual(save_mock.call_count, 1)
 
     def test_brand_new_account_flow_still_creates_profile_on_import(self) -> None:
-        switch_result = CodexSwitchResult(
+        switch_result = AuthStoreSwitchResult(
             command=["internal-save", "--label", "newuser"],
             returncode=0,
             stdout="ok",
@@ -200,7 +200,7 @@ class AutoPersistReauthTests(unittest.TestCase):
         with (
             patch("app.main.read_current_auth", return_value={"email": "newuser@example.com"}),
             patch("app.main.list_profiles", return_value=[]),
-            patch("app.main.list_labels", return_value=[]),
+            patch("app.main.list_auth_labels", return_value=[]),
             patch("app.main.persist_current_auth"),
             patch("app.main._touch_account_usage"),
             patch("app.main.save_current_auth_under_label", return_value=switch_result) as save_mock,
@@ -227,7 +227,7 @@ class AutoPersistReauthTests(unittest.TestCase):
             pid=123,
             error=None,
         )
-        switch_result = CodexSwitchResult(
+        switch_result = AuthStoreSwitchResult(
             command=["internal-save", "--label", "fresh"],
             returncode=0,
             stdout="ok",
@@ -240,7 +240,7 @@ class AutoPersistReauthTests(unittest.TestCase):
             patch("app.main.session_state", return_value=("complete", None)),
             patch("app.main.read_current_auth", return_value={"email": "fresh@example.com"}),
             patch("app.main.list_profiles", return_value=[]),
-            patch("app.main.list_labels", return_value=[]),
+            patch("app.main.list_auth_labels", return_value=[]),
             patch("app.main.persist_current_auth"),
             patch("app.main._touch_account_usage"),
             patch("app.main.save_current_auth_under_label", return_value=switch_result) as save_mock,

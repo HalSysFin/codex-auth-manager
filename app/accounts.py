@@ -24,6 +24,13 @@ class AccountProfile:
     access_token: str | None = None
     email: str | None = None
     auth_updated_at: str | None = None
+    access_token_expires_at: str | None = None
+    id_token_expires_at: str | None = None
+    refresh_token_expires_at: str | None = None
+    last_refresh_at: str | None = None
+    refresh_token_present: bool | None = None
+    reauth_required: bool | None = None
+    reauth_reason: str | None = None
     rate_limit_window_type: str | None = None
     usage_limit: int | None = None
     usage_in_window: int | None = None
@@ -57,7 +64,7 @@ def list_profiles() -> list[AccountProfile]:
         profiles.append(
             AccountProfile(
                 label=str(row.get("label") or identity.email or "account"),
-                path=settings.codex_auth_file(),
+                path=Path("db://active-auth"),
                 auth=auth,
                 account_key=str(row.get("account_key") or identity.account_key or "unknown"),
                 subject=str(row.get("subject")) if row.get("subject") is not None else identity.subject,
@@ -72,6 +79,41 @@ def list_profiles() -> list[AccountProfile]:
                 access_token=access_token,
                 email=str(row.get("email")) if row.get("email") is not None else identity.email,
                 auth_updated_at=str(row.get("auth_updated_at")) if row.get("auth_updated_at") is not None else None,
+                access_token_expires_at=(
+                    str(row.get("access_token_expires_at"))
+                    if row.get("access_token_expires_at") is not None
+                    else None
+                ),
+                id_token_expires_at=(
+                    str(row.get("id_token_expires_at"))
+                    if row.get("id_token_expires_at") is not None
+                    else None
+                ),
+                refresh_token_expires_at=(
+                    str(row.get("refresh_token_expires_at"))
+                    if row.get("refresh_token_expires_at") is not None
+                    else None
+                ),
+                last_refresh_at=(
+                    str(row.get("last_refresh_at"))
+                    if row.get("last_refresh_at") is not None
+                    else None
+                ),
+                refresh_token_present=(
+                    bool(row.get("refresh_token_present"))
+                    if row.get("refresh_token_present") is not None
+                    else None
+                ),
+                reauth_required=(
+                    bool(row.get("reauth_required"))
+                    if row.get("reauth_required") is not None
+                    else None
+                ),
+                reauth_reason=(
+                    str(row.get("reauth_reason"))
+                    if row.get("reauth_reason") is not None
+                    else None
+                ),
             )
         )
 

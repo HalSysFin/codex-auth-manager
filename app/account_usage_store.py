@@ -866,6 +866,13 @@ def upsert_saved_profile(
     subject: str | None = None,
     user_id: str | None = None,
     provider_account_id: str | None = None,
+    access_token_expires_at: str | None = None,
+    id_token_expires_at: str | None = None,
+    refresh_token_expires_at: str | None = None,
+    last_refresh_at: str | None = None,
+    refresh_token_present: bool | None = None,
+    reauth_required: bool | None = None,
+    reauth_reason: str | None = None,
     now: datetime | None = None,
     db_path: Path | None = None,
 ) -> None:
@@ -875,6 +882,21 @@ def upsert_saved_profile(
     clean_account_key = (account_key or "").strip() or "unknown"
     now_iso = _to_iso(_as_utc(now))
     auth_payload = json.dumps(auth_json, sort_keys=True)
+    if (
+        access_token_expires_at is None
+        and id_token_expires_at is None
+        and refresh_token_expires_at is None
+        and last_refresh_at is None
+        and refresh_token_present is None
+    ):
+        from .oauth_flow import extract_auth_db_metadata
+
+        metadata = extract_auth_db_metadata(auth_json)
+        access_token_expires_at = metadata.get("access_token_expires_at")
+        id_token_expires_at = metadata.get("id_token_expires_at")
+        refresh_token_expires_at = metadata.get("refresh_token_expires_at")
+        last_refresh_at = metadata.get("last_refresh_at")
+        refresh_token_present = metadata.get("refresh_token_present")
     with _connect(db_path) as conn:
         _ensure_schema(conn)
         # Keep a single canonical row per concrete account identity.
@@ -903,8 +925,10 @@ def upsert_saved_profile(
                 """
                 INSERT INTO saved_profiles (
                     label, account_key, email, name, subject, user_id, provider_account_id,
-                    auth_json, created_at, updated_at, auth_updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                    auth_json, created_at, updated_at, auth_updated_at,
+                    access_token_expires_at, id_token_expires_at, refresh_token_expires_at, last_refresh_at, refresh_token_present,
+                    reauth_required, reauth_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (label) DO UPDATE
                 SET account_key = EXCLUDED.account_key,
                     email = EXCLUDED.email,
@@ -914,7 +938,14 @@ def upsert_saved_profile(
                     provider_account_id = EXCLUDED.provider_account_id,
                     auth_json = EXCLUDED.auth_json,
                     updated_at = EXCLUDED.updated_at,
-                    auth_updated_at = EXCLUDED.auth_updated_at
+                    auth_updated_at = EXCLUDED.auth_updated_at,
+                    access_token_expires_at = EXCLUDED.access_token_expires_at,
+                    id_token_expires_at = EXCLUDED.id_token_expires_at,
+                    refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
+                    last_refresh_at = EXCLUDED.last_refresh_at,
+                    refresh_token_present = EXCLUDED.refresh_token_present,
+                    reauth_required = EXCLUDED.reauth_required,
+                    reauth_reason = EXCLUDED.reauth_reason
                 """,
                 (
                     clean_label,
@@ -928,6 +959,13 @@ def upsert_saved_profile(
                     now_iso,
                     now_iso,
                     auth_updated_at,
+                    access_token_expires_at,
+                    id_token_expires_at,
+                    refresh_token_expires_at,
+                    last_refresh_at,
+                    bool(refresh_token_present) if refresh_token_present is not None else None,
+                    bool(reauth_required) if reauth_required is not None else None,
+                    reauth_reason,
                 ),
             )
         else:
@@ -935,8 +973,10 @@ def upsert_saved_profile(
                 """
                 INSERT INTO saved_profiles (
                     label, account_key, email, name, subject, user_id, provider_account_id,
-                    auth_json, created_at, updated_at, auth_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    auth_json, created_at, updated_at, auth_updated_at,
+                    access_token_expires_at, id_token_expires_at, refresh_token_expires_at, last_refresh_at, refresh_token_present,
+                    reauth_required, reauth_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(label) DO UPDATE SET
                     account_key = excluded.account_key,
                     email = excluded.email,
@@ -946,7 +986,14 @@ def upsert_saved_profile(
                     provider_account_id = excluded.provider_account_id,
                     auth_json = excluded.auth_json,
                     updated_at = excluded.updated_at,
-                    auth_updated_at = excluded.auth_updated_at
+                    auth_updated_at = excluded.auth_updated_at,
+                    access_token_expires_at = excluded.access_token_expires_at,
+                    id_token_expires_at = excluded.id_token_expires_at,
+                    refresh_token_expires_at = excluded.refresh_token_expires_at,
+                    last_refresh_at = excluded.last_refresh_at,
+                    refresh_token_present = excluded.refresh_token_present,
+                    reauth_required = excluded.reauth_required,
+                    reauth_reason = excluded.reauth_reason
                 """,
                 (
                     clean_label,
@@ -960,8 +1007,41 @@ def upsert_saved_profile(
                     now_iso,
                     now_iso,
                     auth_updated_at,
+                    access_token_expires_at,
+                    id_token_expires_at,
+                    refresh_token_expires_at,
+                    last_refresh_at,
+                    bool(refresh_token_present) if refresh_token_present is not None else None,
+                    bool(reauth_required) if reauth_required is not None else None,
+                    reauth_reason,
                 ),
             )
+
+
+def update_saved_profile_reauth_status(
+    label: str,
+    *,
+    reauth_required: bool,
+    reauth_reason: str | None = None,
+    now: datetime | None = None,
+    db_path: Path | None = None,
+) -> None:
+    clean = (label or "").strip()
+    if not clean:
+        return
+    now_iso = _to_iso(_as_utc(now))
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            UPDATE saved_profiles
+            SET reauth_required = ?,
+                reauth_reason = ?,
+                updated_at = ?
+            WHERE label = ?
+            """,
+            (bool(reauth_required), reauth_reason, now_iso, clean),
+        )
 
 
 def get_saved_profile(label: str, db_path: Path | None = None) -> dict[str, Any] | None:
@@ -1074,6 +1154,46 @@ def set_meta_value(key: str, value: str | None, db_path: Path | None = None) -> 
 
 
 RUNTIME_SETTINGS_KEY = "runtime_settings"
+ACTIVE_AUTH_JSON_KEY = "active_auth_json"
+ACTIVE_AUTH_UPDATED_AT_KEY = "active_auth_updated_at"
+
+
+def get_active_auth_json(db_path: Path | None = None) -> dict[str, Any] | None:
+    raw = get_meta_value(ACTIVE_AUTH_JSON_KEY, db_path=db_path)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def set_active_auth_json(payload: dict[str, Any] | None, db_path: Path | None = None) -> None:
+    now_iso = _to_iso(datetime.now(timezone.utc))
+    encoded = json.dumps(payload, sort_keys=True) if isinstance(payload, dict) else None
+    with _connect(db_path) as conn:
+        _ensure_schema(conn)
+        conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (ACTIVE_AUTH_JSON_KEY, encoded, now_iso),
+        )
+        conn.execute(
+            """
+            INSERT INTO app_meta (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (ACTIVE_AUTH_UPDATED_AT_KEY, now_iso if payload is not None else None, now_iso),
+        )
+
+
+def get_active_auth_updated_at(db_path: Path | None = None) -> str | None:
+    return get_meta_value(ACTIVE_AUTH_UPDATED_AT_KEY, db_path=db_path)
 
 
 def runtime_settings_defaults() -> dict[str, Any]:
@@ -1785,8 +1905,15 @@ def _row_to_saved_profile(row: Any) -> dict[str, Any]:
         "created_at": row["created_at"] if isinstance(row, dict) else row[8],
         "updated_at": row["updated_at"] if isinstance(row, dict) else row[9],
         "auth_updated_at": row.get("auth_updated_at") if isinstance(row, dict) else (row[10] if len(row) > 10 else None),
-        "last_used_at": row.get("last_used_at") if isinstance(row, dict) else (row[11] if len(row) > 11 else None),
-        "switched_at": row.get("switched_at") if isinstance(row, dict) else (row[12] if len(row) > 12 else None),
+        "access_token_expires_at": row.get("access_token_expires_at") if isinstance(row, dict) else (row[11] if len(row) > 11 else None),
+        "id_token_expires_at": row.get("id_token_expires_at") if isinstance(row, dict) else (row[12] if len(row) > 12 else None),
+        "refresh_token_expires_at": row.get("refresh_token_expires_at") if isinstance(row, dict) else (row[13] if len(row) > 13 else None),
+        "last_refresh_at": row.get("last_refresh_at") if isinstance(row, dict) else (row[14] if len(row) > 14 else None),
+        "refresh_token_present": row.get("refresh_token_present") if isinstance(row, dict) else (row[15] if len(row) > 15 else None),
+        "last_used_at": row.get("last_used_at") if isinstance(row, dict) else (row[16] if len(row) > 16 else None),
+        "switched_at": row.get("switched_at") if isinstance(row, dict) else (row[17] if len(row) > 17 else None),
+        "reauth_required": row.get("reauth_required") if isinstance(row, dict) else (row[18] if len(row) > 18 else None),
+        "reauth_reason": row.get("reauth_reason") if isinstance(row, dict) else (row[19] if len(row) > 19 else None),
     }
 
 
@@ -1964,6 +2091,13 @@ def _ensure_schema_postgres(conn: Any) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             auth_updated_at TEXT NULL,
+            access_token_expires_at TEXT NULL,
+            id_token_expires_at TEXT NULL,
+            refresh_token_expires_at TEXT NULL,
+            last_refresh_at TEXT NULL,
+            refresh_token_present BOOLEAN NULL,
+            reauth_required BOOLEAN NULL,
+            reauth_reason TEXT NULL,
             last_used_at TEXT NULL,
             switched_at TEXT NULL
         )
@@ -2128,6 +2262,13 @@ def _ensure_schema_postgres(conn: Any) -> None:
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS created_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
     conn.execute("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00'")
     conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS auth_updated_at TEXT NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS access_token_expires_at TEXT NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS id_token_expires_at TEXT NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS refresh_token_expires_at TEXT NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS last_refresh_at TEXT NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS refresh_token_present BOOLEAN NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS reauth_required BOOLEAN NULL")
+    conn.execute("ALTER TABLE saved_profiles ADD COLUMN IF NOT EXISTS reauth_reason TEXT NULL")
     conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS primary_percent_at_reset DOUBLE PRECISION NULL")
     conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS secondary_percent_at_reset DOUBLE PRECISION NULL")
     conn.execute("ALTER TABLE usage_rollovers ADD COLUMN IF NOT EXISTS window_type TEXT NOT NULL DEFAULT 'short'")
@@ -2389,6 +2530,13 @@ def _ensure_schema_sqlite(conn: Any) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             auth_updated_at TEXT NULL,
+            access_token_expires_at TEXT NULL,
+            id_token_expires_at TEXT NULL,
+            refresh_token_expires_at TEXT NULL,
+            last_refresh_at TEXT NULL,
+            refresh_token_present INTEGER NULL,
+            reauth_required INTEGER NULL,
+            reauth_reason TEXT NULL,
             last_used_at TEXT NULL,
             switched_at TEXT NULL
         )
@@ -2399,6 +2547,20 @@ def _ensure_schema_sqlite(conn: Any) -> None:
     cols_saved = {str(row["name"]) for row in conn.execute("PRAGMA table_info(saved_profiles)").fetchall()}
     if "auth_updated_at" not in cols_saved:
         conn.execute("ALTER TABLE saved_profiles ADD COLUMN auth_updated_at TEXT NULL")
+    if "access_token_expires_at" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN access_token_expires_at TEXT NULL")
+    if "id_token_expires_at" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN id_token_expires_at TEXT NULL")
+    if "refresh_token_expires_at" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN refresh_token_expires_at TEXT NULL")
+    if "last_refresh_at" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN last_refresh_at TEXT NULL")
+    if "refresh_token_present" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN refresh_token_present INTEGER NULL")
+    if "reauth_required" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN reauth_required INTEGER NULL")
+    if "reauth_reason" not in cols_saved:
+        conn.execute("ALTER TABLE saved_profiles ADD COLUMN reauth_reason TEXT NULL")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS app_meta (

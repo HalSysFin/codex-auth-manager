@@ -8,6 +8,8 @@ What it does:
 - reacquires, renews, rotates, and releases leases through the existing broker API
 - materializes leased auth via the backend and writes `~/.codex/auth.json`
 - refreshes lease state in the background
+- reconciles local `~/.codex/auth.json` changes back to Auth Manager when Codex refreshes auth outside the app
+- rewrites local auth automatically when the manager has newer tokens
 - posts minimal truthful lease telemetry
 - persists non-secret lease metadata and local settings across restarts
 - shows current lease and usage state in a desktop UI
@@ -39,6 +41,7 @@ The app expects these existing backend endpoints:
 - `POST /api/leases/{lease_id}/telemetry`
 - `POST /api/leases/rotate`
 - `POST /api/leases/{lease_id}/materialize`
+- `POST /api/leases/{lease_id}/reconcile-auth`
 
 The materialize endpoint must return `credential_material.auth_json`.
 

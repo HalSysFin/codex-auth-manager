@@ -73,6 +73,75 @@
         color: #0a0a0a;
         border: none;
       }
+      .toggleRow {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 0 0 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: #111;
+      }
+      .toggleCopy {
+        min-width: 0;
+      }
+      .toggleLabel {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .toggleHint {
+        margin-top: 3px;
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.35;
+      }
+      .switch {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+      }
+      .switch input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .slider {
+        position: relative;
+        width: 44px;
+        height: 24px;
+        border-radius: 999px;
+        background: #333;
+        border: 1px solid #424242;
+        transition: background 0.2s ease, border-color 0.2s ease;
+      }
+      .slider::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #fafafa;
+        transition: transform 0.2s ease;
+      }
+      .switch input:checked + .slider {
+        background: rgba(16, 185, 129, 0.22);
+        border-color: rgba(16, 185, 129, 0.7);
+      }
+      .switch input:checked + .slider::after {
+        transform: translateX(20px);
+      }
+      .toggleState {
+        min-width: 22px;
+        font-size: 12px;
+        font-weight: 700;
+        color: var(--muted);
+        text-align: right;
+      }
       .btn.link {
         margin-top: 8px;
         padding: 0;
@@ -116,6 +185,17 @@
       <div class="card">
         <h1><span class="dot"></span>Auth Relay</h1>
         <p>Start relay login, complete auth in the opened tab, then localhost callback is captured and sent to auth-manager.</p>
+        <div class="toggleRow">
+          <div class="toggleCopy">
+            <div class="toggleLabel">Relay Capture</div>
+            <div class="toggleHint">Turn callback interception on or off from the popup.</div>
+          </div>
+          <label class="switch" aria-label="Toggle relay capture">
+            <input id="relayEnabled" type="checkbox" />
+            <span class="slider"></span>
+          </label>
+          <div id="relayState" class="toggleState">On</div>
+        </div>
         <button id="startBtn" class="btn primary" type="button">Start Relay Login</button>
         <button id="optionsBtn" class="btn link" type="button">Settings</button>
         <div id="status" class="status"></div>

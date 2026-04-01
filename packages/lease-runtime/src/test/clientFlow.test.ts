@@ -146,6 +146,62 @@ test('telemetry post preserves truthful null counters when client has no token d
   assert.equal(body.utilization_pct, 42)
 })
 
+test('reconcile auth posts local auth payload to the lease endpoint', async () => {
+  let requestedUrl = ''
+  let requestedBody: Record<string, unknown> | null = null
+  const client = new AuthManagerClient({
+    baseUrl: 'http://127.0.0.1:8080',
+    internalApiToken: 'secret-token',
+    allowInsecureLocalhost: true,
+    fetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
+      requestedUrl = String(input)
+      requestedBody = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
+      return new Response(JSON.stringify({
+        status: 'ok',
+        decision: 'client_updated_manager',
+        reason: 'manager_updated',
+        profile_label: 'alice',
+        credential_auth_updated_at: '2026-03-23T00:11:00.000Z',
+        auth_json: null,
+      }), { status: 200 })
+    },
+  })
+
+  const result = await client.reconcileLeaseAuth('lease-1', {
+    machineId: 'machine-a',
+    agentId: 'agent-a',
+    authJson: {
+      auth_mode: 'chatgpt',
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: 'id-token',
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        account_id: 'acct-1',
+      },
+      last_refresh: '2026-03-23T00:10:00.000Z',
+    },
+  })
+
+  assert.equal(requestedUrl, 'http://127.0.0.1:8080/api/leases/lease-1/reconcile-auth')
+  assert.deepEqual(requestedBody, {
+    machine_id: 'machine-a',
+    agent_id: 'agent-a',
+    auth_json: {
+      auth_mode: 'chatgpt',
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: 'id-token',
+        access_token: 'access-token',
+        refresh_token: 'refresh-token',
+        account_id: 'acct-1',
+      },
+      last_refresh: '2026-03-23T00:10:00.000Z',
+    },
+  })
+  assert.equal(result.decision, 'client_updated_manager')
+})
+
 test('rotate plus materialize returns the replacement auth payload', async () => {
   const client = new AuthManagerClient({
     baseUrl: 'http://127.0.0.1:8080',

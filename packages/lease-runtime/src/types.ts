@@ -69,6 +69,15 @@ export interface LeaseTelemetryRequest {
   error_rate_1h?: number | null
 }
 
+export interface LeaseAuthReconcileResponse {
+  status: 'ok'
+  decision: 'in_sync' | 'client_updated_manager' | 'manager_updated_client'
+  reason: string | null
+  profile_label?: string | null
+  credential_auth_updated_at?: string | null
+  auth_json?: AuthPayload | null
+}
+
 export interface AuthPayload {
   auth_mode: string
   OPENAI_API_KEY: null
@@ -109,6 +118,7 @@ export interface RuntimeLeaseState {
   latestQuotaRemaining: number | null
   credentialAuthUpdatedAt: string | null
   lastAuthWriteAt: string | null
+  lastAuthFingerprint?: string | null
   lastBackendRefreshAt: string | null
   replacementRequired: boolean
   rotationRecommended: boolean

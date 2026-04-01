@@ -2,7 +2,7 @@
   "name": "cam-antigravity-extension",
   "displayName": "CAM Antigravity Extension",
   "description": "Connects Antigravity to Codex Auth Manager leases and writes leased auth payloads into ~/.codex/auth.json.",
-  "version": "1.12.5",
+  "version": "1.12.6",
   "publisher": "halsysfin",
   "license": "MIT",
   "repository": {

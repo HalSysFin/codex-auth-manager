@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from app.account_identity import extract_account_identity
 from app.accounts import AccountProfile, list_profiles
-from app.codex_switch import CodexSwitchResult
+from app.auth_store import AuthStoreSwitchResult
 from app.main import _infer_account_type, _persist_current_auth_to_profile, auth_switch
 
 
@@ -115,7 +115,7 @@ class AccountIdentityTrackingTests(unittest.TestCase):
         with (
             patch("app.main.read_current_auth", return_value=incoming_auth),
             patch("app.main.list_profiles", return_value=[existing_profile]),
-            patch("app.main.list_labels", return_value=["james"]),
+            patch("app.main.list_auth_labels", return_value=["james"]),
             patch("app.main.persist_current_auth"),
             patch("app.main.save_current_auth_under_label"),
             patch("app.main._touch_account_usage"),
@@ -140,8 +140,8 @@ class AccountIdentityTrackingTests(unittest.TestCase):
             patch("app.main._require_internal_auth", return_value=None),
             patch("app.main._profile_for_label", return_value=profile),
             patch(
-                "app.main.switch_label",
-                return_value=CodexSwitchResult(
+                "app.main.switch_active_auth_to_label",
+                return_value=AuthStoreSwitchResult(
                     command=["internal-switch", "--label", "max"],
                     returncode=0,
                     stdout="ok",

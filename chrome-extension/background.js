@@ -2,7 +2,8 @@ const SESSION_KEY = "activeRelaySession";
 const SETTINGS_KEY = "relaySettings";
 const DEFAULT_SETTINGS = {
   authManagerBaseUrl: "http://localhost:8080",
-  authManagerBearerToken: ""
+  authManagerBearerToken: "",
+  relayEnabled: true
 };
 const CALLBACK_URL_FILTER = {
   url: [
@@ -32,6 +33,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "get-relay-settings") {
     getRelaySettings()
+      .then((settings) => sendResponse({ ok: true, settings }))
+      .catch((error) =>
+        sendResponse({ ok: false, error: String(error?.message || error) })
+      );
+    return true;
+  }
+
+  if (message?.type === "set-relay-enabled") {
+    setRelayEnabled(Boolean(message.enabled))
       .then((settings) => sendResponse({ ok: true, settings }))
       .catch((error) =>
         sendResponse({ ok: false, error: String(error?.message || error) })
@@ -75,6 +85,9 @@ async function maybeHandleLocalhostCallback(tabId, callbackUrl) {
 
 async function startLoginFlow({ openErrorTab }) {
   const settings = await getRelaySettings();
+  if (!settings.relayEnabled) {
+    throw new Error("Relay is turned off. Enable it in the popup before starting login.");
+  }
   const baseUrl = normalizeBaseUrl(settings.authManagerBaseUrl);
   const token = settings.authManagerBearerToken || "";
 
@@ -128,6 +141,11 @@ async function startLoginFlow({ openErrorTab }) {
 }
 
 async function handleLocalhostCallback(tabId, callbackUrl) {
+  const currentSettings = await getRelaySettings();
+  if (!currentSettings.relayEnabled) {
+    return;
+  }
+
   const storageData = await chrome.storage.session.get(SESSION_KEY);
   const session = storageData[SESSION_KEY];
 
@@ -163,9 +181,17 @@ async function handleLocalhostCallback(tabId, callbackUrl) {
       throw new Error(await readError(response, "Relay callback failed"));
     }
 
+    const data = await response.json();
+    const relaySummary = summarizeRelayResponse(data);
+    if (!relaySummary.ok) {
+      throw new Error(relaySummary.message);
+    }
+
     await chrome.storage.session.remove(SESSION_KEY);
     await chrome.tabs.update(tabId, {
-      url: chrome.runtime.getURL("success.html")
+      url: chrome.runtime.getURL(
+        `success.html#message=${encodeURIComponent(relaySummary.message)}`
+      )
     });
   } catch (error) {
     const reason = encodeURIComponent(String(error.message || error));
@@ -202,6 +228,55 @@ function requestHeaders(token) {
   return headers;
 }
 
+function summarizeRelayResponse(data) {
+  const handoff = data?.handoff || {};
+  const autoPersist = data?.auto_persist || {};
+
+  if (handoff.completed !== true) {
+    return {
+      ok: false,
+      message:
+        handoff.message ||
+        "Auth callback was received, but the token exchange did not complete."
+    };
+  }
+
+  if (autoPersist.attempted === true) {
+    if (autoPersist.status === "persisted") {
+      const label = autoPersist.label ? ` as ${autoPersist.label}` : "";
+      const action = autoPersist.created_new_profile
+        ? "saved as a new profile"
+        : "updated in the matching profile";
+      return {
+        ok: true,
+        message: `Login completed and ${action}${label}.`
+      };
+    }
+
+    if (autoPersist.status === "skipped" && autoPersist.reason === "up_to_date") {
+      const label = autoPersist.label ? ` (${autoPersist.label})` : "";
+      return {
+        ok: true,
+        message: `Login completed. Saved profile was already up to date${label}.`
+      };
+    }
+
+    if (autoPersist.status === "error") {
+      return {
+        ok: false,
+        message:
+          autoPersist.error ||
+          "Auth finalized, but saving it to the profile failed."
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    message: handoff.message || "Login completed."
+  };
+}
+
 async function openErrorPage(reason) {
   const encoded = encodeURIComponent(reason);
   await chrome.tabs.create({
@@ -215,8 +290,27 @@ async function getRelaySettings() {
   return {
     authManagerBaseUrl: stored.authManagerBaseUrl || DEFAULT_SETTINGS.authManagerBaseUrl,
     authManagerBearerToken:
-      stored.authManagerBearerToken || DEFAULT_SETTINGS.authManagerBearerToken
+      stored.authManagerBearerToken || DEFAULT_SETTINGS.authManagerBearerToken,
+    relayEnabled:
+      typeof stored.relayEnabled === "boolean"
+        ? stored.relayEnabled
+        : DEFAULT_SETTINGS.relayEnabled
   };
+}
+
+async function setRelayEnabled(enabled) {
+  const settings = await getRelaySettings();
+  const next = {
+    ...settings,
+    relayEnabled: enabled
+  };
+  await chrome.storage.sync.set({
+    [SETTINGS_KEY]: next
+  });
+  if (!enabled) {
+    await chrome.storage.session.remove(SESSION_KEY);
+  }
+  return next;
 }
 
 function normalizeBaseUrl(url) {

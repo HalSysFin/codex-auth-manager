@@ -1,10 +1,10 @@
 # Codex Auth Manager
 
-Auth profile manager for Codex CLI with:
+Auth profile manager for Codex and ChatGPT OAuth with:
 - FastAPI backend
 - React + Vite frontend
 - Postgres as canonical persistence
-- Single active `auth.json` materialized on disk
+- DB-backed active auth and per-profile token persistence
 
 ## What It Does
 
@@ -50,9 +50,9 @@ This repo now contains several clients around the same Auth Manager backend and 
 ## Current Architecture
 
 - **Canonical storage**: Postgres (`saved_profiles`, usage tables, snapshots, metadata).
-- **Runtime auth file**: only one active auth at `CODEX_AUTH_PATH` (default `/root/.codex/auth.json`).
+- **Active auth**: DB-backed active auth state, with leased/materialized `auth.json` copies written only for clients that need them.
 - **Switching**: internal DB-backed switching.
-- **Login/relay**: Codex CLI login start + callback relay into auth-manager.
+- **Login/relay**: in-app PKCE login start + callback relay into auth-manager.
 - **UI loading**: cached-first snapshot, then async SSE refresh.
 
 ## Main Flows
@@ -98,6 +98,22 @@ This repo now contains several clients around the same Auth Manager backend and 
 - `POST /auth/rename`
 - `POST /auth/delete`
 - `GET /auth/export?label=<label>`
+- `POST /api/leases/{lease_id}/reconcile-auth`
+
+## Releases
+
+Monorepo release notes live in [CHANGELOG.md](./CHANGELOG.md).
+
+Component release notes live alongside each package:
+
+- `vscode-extension/CHANGELOG.md`
+- `cursor-extension/CHANGELOG.md`
+- `antigravity-extension/CHANGELOG.md`
+- `chrome-extension/CHANGELOG.md`
+- `desktop-app/CHANGELOG.md`
+- `headless-client/CHANGELOG.md`
+- `openclaw-plugin/CHANGELOG.md`
+- `frontend/CHANGELOG.md`
 
 ## Environment
 

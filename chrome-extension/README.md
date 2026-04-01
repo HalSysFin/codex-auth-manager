@@ -9,6 +9,7 @@ It is intended to help when the login flow opens a browser tab that returns to a
 - starts a relay-backed login flow from the browser
 - watches for the localhost callback URL
 - posts the callback payload to Auth Manager
+- lets Auth Manager perform the full token exchange and saved-profile update server-side
 - helps complete the Add Account / login relay flow without copying data manually every time
 
 ## Folder

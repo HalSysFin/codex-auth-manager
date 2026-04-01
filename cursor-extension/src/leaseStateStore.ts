@@ -139,8 +139,8 @@ export class LeaseStateStore {
     return next
   }
 
-  async recordAuthWrite(state: LeaseState, atIso: string): Promise<LeaseState> {
-    const next = sharedRecordAuthWrite(state, atIso)
+  async recordAuthWrite(state: LeaseState, atIso: string, fingerprint: string | null = null): Promise<LeaseState> {
+    const next = sharedRecordAuthWrite(state, atIso, fingerprint)
     await this.save(next)
     return next
   }

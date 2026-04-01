@@ -15,12 +15,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    codex_cli_bin: str = "codex"
-    codex_auth_path: str = "/root/.codex/auth.json"
-    codex_refresh_enabled: bool = True
-    codex_refresh_model: str = "gpt-4o-mini"
-    codex_refresh_prompt: str = "Reply with exactly OK."
-    codex_refresh_timeout_seconds: int = 30
     callback_store_dir: str = "/var/lib/auth-manager/callbacks"
     codex_profiles_dir: str = "/var/lib/auth-manager/legacy/profiles"
     usage_db_path: str = "/var/lib/auth-manager/legacy/auth-manager.sqlite3"
@@ -39,10 +33,26 @@ class Settings(BaseSettings):
     internal_api_token: str | None = None
     openai_organization: str | None = None
     openai_project: str | None = None
+    openai_auth_url: str = "https://auth.openai.com/oauth/authorize"
     openai_token_url: str | None = None
     openai_client_id: str | None = None
     openai_client_secret: str | None = None
     openai_redirect_uri: str | None = None
+    openai_scope: str = "openid profile email offline_access"
+    openai_originator: str = "codex_cli_rs"
+    openai_id_token_add_organizations: bool = True
+    openai_codex_cli_simplified_flow: bool = True
+    openai_rate_limits_url: str | None = None
+    openai_account_url: str | None = None
+    chatgpt_backend_rate_limits_url: str = "https://chatgpt.com/backend-api/codex/responses"
+    chatgpt_backend_rate_limits_model: str = "gpt-5.1-codex-mini"
+    chatgpt_backend_rate_limits_instructions: str = "You are Codex. Be concise."
+    chatgpt_backend_rate_limits_prompt: str = "Reply with exactly OK."
+    codex_bin: str = "codex"
+    rate_limit_sync_interval_seconds: int = 300
+    rate_limit_worker_timeout_seconds: int = 20
+    live_rate_limit_worker_timeout_seconds: int = 8
+    live_refresh_concurrency: int = 12
     analytics_timezone: str = "UTC"
     analytics_snapshot_interval_seconds: int = 600
     max_assignable_utilization_percent: float = 99.0
@@ -55,9 +65,7 @@ class Settings(BaseSettings):
     lease_stale_after_seconds: int = 60
     lease_reclaim_after_seconds: int = 180
     weekly_reset_confirmation_required: bool = True
-
-    def codex_auth_file(self) -> Path:
-        return _expand(self.codex_auth_path)
+    auth_keepalive_in_app: bool = True
 
     def callback_dir(self) -> Path:
         return _expand(self.callback_store_dir)

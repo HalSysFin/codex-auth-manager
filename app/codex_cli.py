@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import json
 import re
 import subprocess
-import time
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
+import httpx
+
+from .account_usage_store import get_active_auth_json, get_active_auth_updated_at, set_active_auth_json
 from .config import settings
+from .oauth_flow import build_auth_payload, build_oauth_authorize_url
 
 EMAIL_KEYS = [
     "email",
@@ -27,7 +32,6 @@ ID_TOKEN_KEYS = [
     "idToken",
 ]
 
-URL_RE = re.compile(r"https?://[^\s\"'>]+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 DASH_RE = re.compile(r"-+")
 
@@ -70,259 +74,486 @@ class AppServerRateLimitsResult:
 @dataclass
 class _LoginState:
     started_at: datetime
-    before_mtime: float | None
     process: subprocess.Popen[str] | None
     browser_url: str | None
     output_excerpt: str | None
+    oauth_state: str | None = None
+    code_verifier: str | None = None
+    redirect_uri: str | None = None
+    auth_updated_at: str | None = None
 
 
 _LOGIN_STATE: _LoginState | None = None
 
 
 def read_rate_limits_via_app_server(timeout_seconds: float = 15.0) -> AppServerRateLimitsResult:
-    cmd = [settings.codex_cli_bin, "app-server", "--listen", "stdio://"]
+    auth_json = read_current_auth()
+    return read_rate_limits_for_auth(auth_json, timeout_seconds=timeout_seconds)
+
+
+async def read_rate_limits_via_app_server_async(timeout_seconds: float = 15.0) -> AppServerRateLimitsResult:
+    auth_json = read_current_auth()
+    return await read_rate_limits_for_auth_async(auth_json, timeout_seconds=timeout_seconds)
+
+
+def read_rate_limits_for_auth(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        return _read_rate_limits_via_worker(auth_json, timeout_seconds=timeout_seconds)
+    except CodexCLIError:
+        pass
+    if str(settings.chatgpt_backend_rate_limits_url or "").strip():
+        try:
+            return _read_rate_limits_via_chatgpt_backend(
+                auth_json,
+                timeout_seconds=timeout_seconds,
+            )
+        except CodexCLIError:
+            pass
+    if settings.openai_rate_limits_url:
+        return _read_rate_limits_via_direct_api(auth_json, timeout_seconds=timeout_seconds)
+    return _read_rate_limits_via_worker(auth_json, timeout_seconds=timeout_seconds)
+
+
+async def read_rate_limits_for_auth_async(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    try:
+        return await _read_rate_limits_via_worker_async(
+            auth_json,
+            timeout_seconds=timeout_seconds,
         )
-    except FileNotFoundError as exc:
-        raise CodexCLIError(f"codex CLI binary not found: {settings.codex_cli_bin}") from exc
-    except OSError as exc:
-        raise CodexCLIError(f"Unable to start codex app-server: {exc}") from exc
+    except CodexCLIError:
+        pass
+    if str(settings.chatgpt_backend_rate_limits_url or "").strip():
+        try:
+            return await _read_rate_limits_via_chatgpt_backend_async(
+                auth_json,
+                timeout_seconds=timeout_seconds,
+            )
+        except CodexCLIError:
+            pass
+    if settings.openai_rate_limits_url:
+        return await _read_rate_limits_via_direct_api_async(
+            auth_json,
+            timeout_seconds=timeout_seconds,
+        )
+    return await _read_rate_limits_via_worker_async(auth_json, timeout_seconds=timeout_seconds)
 
-    responses: dict[int, dict[str, Any]] = {}
-    notifications: list[dict[str, Any]] = []
-    deadline = time.monotonic() + timeout_seconds
 
-    try:
-        _rpc_send(
-            process,
+def _chatgpt_backend_headers(auth_json: dict[str, Any]) -> dict[str, str]:
+    access_token = _find_first_key(auth_json, ["access_token", "accessToken", "token"])
+    if not access_token:
+        raise CodexCLIError("No access token available for ChatGPT backend rate-limit request")
+    account_id = _find_first_key(auth_json, ["account_id", "accountId"])
+    if not account_id:
+        raise CodexCLIError("No account id available for ChatGPT backend rate-limit request")
+
+    originator = str(settings.openai_originator or "codex_cli_rs").strip() or "codex_cli_rs"
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "chatgpt-account-id": account_id,
+        "originator": originator,
+        "User-Agent": f"{originator} (linux; x86_64)",
+        "OpenAI-Beta": "responses=experimental",
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+    }
+
+
+def _chatgpt_backend_payload() -> dict[str, Any]:
+    return {
+        "model": str(settings.chatgpt_backend_rate_limits_model or "gpt-5.1-codex-mini").strip() or "gpt-5.1-codex-mini",
+        "instructions": str(settings.chatgpt_backend_rate_limits_instructions or "You are Codex. Be concise.").strip() or "You are Codex. Be concise.",
+        "store": False,
+        "stream": True,
+        "input": [
             {
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {
-                        "name": "auth_manager",
-                        "title": "Codex Auth Manager",
-                        "version": "0.2.0",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": str(settings.chatgpt_backend_rate_limits_prompt or "Reply with exactly OK.").strip() or "Reply with exactly OK.",
                     }
-                },
-            },
+                ],
+            }
+        ],
+    }
+
+
+def _parse_bool_header(value: str | None) -> bool | None:
+    raw = str(value or "").strip().lower()
+    if raw in {"true", "1", "yes"}:
+        return True
+    if raw in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _parse_int_header(value: str | None) -> int | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _chatgpt_rate_limits_from_headers(headers: dict[str, str]) -> dict[str, Any]:
+    primary_used = _parse_int_header(headers.get("x-codex-primary-used-percent"))
+    secondary_used = _parse_int_header(headers.get("x-codex-secondary-used-percent"))
+    primary_window = _parse_int_header(headers.get("x-codex-primary-window-minutes"))
+    secondary_window = _parse_int_header(headers.get("x-codex-secondary-window-minutes"))
+    primary_reset_at = _parse_int_header(headers.get("x-codex-primary-reset-at"))
+    secondary_reset_at = _parse_int_header(headers.get("x-codex-secondary-reset-at"))
+    primary_reset_after = _parse_int_header(headers.get("x-codex-primary-reset-after-seconds"))
+    secondary_reset_after = _parse_int_header(headers.get("x-codex-secondary-reset-after-seconds"))
+
+    if all(
+        value is None
+        for value in (
+            primary_used,
+            secondary_used,
+            primary_window,
+            secondary_window,
+            primary_reset_at,
+            secondary_reset_at,
         )
-        _rpc_send(process, {"method": "initialized", "params": {}})
-        _rpc_send(
-            process,
-            {"id": 2, "method": "account/read", "params": {"refreshToken": True}},
+    ):
+        raise CodexCLIError("ChatGPT backend response did not include Codex rate-limit headers")
+
+    primary: dict[str, Any] = {
+        "usedPercent": primary_used,
+        "percent": primary_used,
+        "windowDurationMins": primary_window,
+        "resetsAt": primary_reset_at,
+    }
+    secondary: dict[str, Any] = {
+        "usedPercent": secondary_used,
+        "percent": secondary_used,
+        "windowDurationMins": secondary_window,
+        "resetsAt": secondary_reset_at,
+    }
+    if primary_reset_after is not None:
+        primary["resetAfterSeconds"] = primary_reset_after
+    if secondary_reset_after is not None:
+        secondary["resetAfterSeconds"] = secondary_reset_after
+
+    return {
+        "limitId": headers.get("x-codex-active-limit"),
+        "planType": headers.get("x-codex-plan-type"),
+        "primary": primary,
+        "secondary": secondary,
+        "credits": {
+            "hasCredits": _parse_bool_header(headers.get("x-codex-credits-has-credits")),
+            "balance": headers.get("x-codex-credits-balance"),
+            "unlimited": _parse_bool_header(headers.get("x-codex-credits-unlimited")),
+        },
+        "raw_headers": headers,
+    }
+
+
+def _read_rate_limits_via_chatgpt_backend(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    url = str(settings.chatgpt_backend_rate_limits_url or "").strip()
+    if not url:
+        raise CodexCLIError("Missing configured ChatGPT backend rate-limit URL")
+    headers = _chatgpt_backend_headers(auth_json)
+    payload = _chatgpt_backend_payload()
+    try:
+        with httpx.Client(timeout=timeout_seconds, follow_redirects=True) as client:
+            with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    detail = response.read().decode("utf-8", errors="replace").strip()
+                    raise CodexCLIError(detail or f"ChatGPT backend request failed with HTTP {response.status_code}")
+                parsed = _chatgpt_rate_limits_from_headers(dict(response.headers))
+    except httpx.HTTPError as exc:
+        raise CodexCLIError(f"Unable to reach ChatGPT backend rate-limit endpoint {url}: {exc}") from exc
+
+    return AppServerRateLimitsResult(account=None, rate_limits=parsed, notifications=[])
+
+
+async def _read_rate_limits_via_chatgpt_backend_async(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    url = str(settings.chatgpt_backend_rate_limits_url or "").strip()
+    if not url:
+        raise CodexCLIError("Missing configured ChatGPT backend rate-limit URL")
+    headers = _chatgpt_backend_headers(auth_json)
+    payload = _chatgpt_backend_payload()
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    detail = (await response.aread()).decode("utf-8", errors="replace").strip()
+                    raise CodexCLIError(detail or f"ChatGPT backend request failed with HTTP {response.status_code}")
+                parsed = _chatgpt_rate_limits_from_headers(dict(response.headers))
+    except httpx.HTTPError as exc:
+        raise CodexCLIError(f"Unable to reach ChatGPT backend rate-limit endpoint {url}: {exc}") from exc
+
+    return AppServerRateLimitsResult(account=None, rate_limits=parsed, notifications=[])
+
+
+def _read_rate_limits_via_direct_api(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    access_token = _find_first_key(auth_json, ["access_token", "accessToken", "token"])
+    if not access_token:
+        raise CodexCLIError("No access token available for direct rate-limit request")
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "codex-auth-manager/direct-rate-limits",
+    }
+
+    rate_limits = _http_json_request(
+        settings.openai_rate_limits_url,
+        headers=headers,
+        timeout_seconds=timeout_seconds,
+    )
+
+    account = None
+    if settings.openai_account_url:
+        account_response = _http_json_request(
+            settings.openai_account_url,
+            headers=headers,
+            timeout_seconds=timeout_seconds,
         )
-        _rpc_send(
-            process,
-            {"id": 3, "method": "account/rateLimits/read", "params": {}},
+        if isinstance(account_response, dict):
+            account = account_response.get("account") if isinstance(account_response.get("account"), dict) else account_response
+
+    return AppServerRateLimitsResult(
+        account=account if isinstance(account, dict) else None,
+        rate_limits=rate_limits,
+        notifications=[],
+    )
+
+
+async def _read_rate_limits_via_direct_api_async(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    access_token = _find_first_key(auth_json, ["access_token", "accessToken", "token"])
+    if not access_token:
+        raise CodexCLIError("No access token available for direct rate-limit request")
+
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {access_token}",
+        "User-Agent": "codex-auth-manager/direct-rate-limits",
+    }
+
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        rate_limits_task = _http_json_request_async(
+            client,
+            settings.openai_rate_limits_url,
+            headers=headers,
         )
-
-        while time.monotonic() < deadline:
-            if 2 in responses and 3 in responses:
-                break
-
-            line = _readline_with_timeout(process, timeout_seconds=0.25)
-            if line is None:
-                continue
-            raw = line.strip()
-            if not raw:
-                continue
-
-            try:
-                message = json.loads(raw)
-            except ValueError:
-                continue
-            if not isinstance(message, dict):
-                continue
-
-            message_id = message.get("id")
-            if isinstance(message_id, int):
-                responses[message_id] = message
-                continue
-
-            method = message.get("method")
-            if isinstance(method, str):
-                notifications.append(message)
-
-        if 2 not in responses or 3 not in responses:
-            stderr_excerpt = _drain_stderr(process, max_lines=20)
-            detail = (
-                f"; stderr: {' | '.join(stderr_excerpt)}"
-                if stderr_excerpt
-                else ""
-            )
-            raise CodexCLIError(
-                "Timed out waiting for codex app-server account/rate-limit responses"
-                + detail
-            )
-
-        account_response = responses[2]
-        rate_limit_response = responses[3]
-
-        if "error" in account_response:
-            raise CodexCLIError(_rpc_error_text("account/read", account_response["error"]))
-        if "error" in rate_limit_response:
-            raise CodexCLIError(
-                _rpc_error_text("account/rateLimits/read", rate_limit_response["error"])
-            )
-
-        account_result = account_response.get("result")
-        account = None
-        if isinstance(account_result, dict):
-            maybe_account = account_result.get("account")
-            if isinstance(maybe_account, dict):
-                account = maybe_account
-
-        rate_limits = rate_limit_response.get("result")
-        return AppServerRateLimitsResult(
-            account=account,
-            rate_limits=rate_limits,
-            notifications=notifications,
+        account_task = (
+            _http_json_request_async(client, settings.openai_account_url, headers=headers)
+            if settings.openai_account_url
+            else None
         )
-    finally:
-        _stop_process(process)
+        if account_task is not None:
+            rate_limits, account_response = await asyncio.gather(rate_limits_task, account_task)
+        else:
+            rate_limits = await rate_limits_task
+            account_response = None
+
+    account = None
+    if isinstance(account_response, dict):
+        account = account_response.get("account") if isinstance(account_response.get("account"), dict) else account_response
+
+    return AppServerRateLimitsResult(
+        account=account if isinstance(account, dict) else None,
+        rate_limits=rate_limits,
+        notifications=[],
+    )
+
+
+def _read_rate_limits_via_worker(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    payload = _worker_payload(auth_json, timeout_seconds=timeout_seconds)
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "app.codex_app_server_worker"],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            timeout=max(timeout_seconds + 1.0, timeout_seconds),
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CodexCLIError(f"Unable to start Codex rate-limit worker: {exc}") from exc
+    return _parse_worker_result(
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        returncode=completed.returncode,
+    )
+
+
+async def _read_rate_limits_via_worker_async(
+    auth_json: dict[str, Any],
+    timeout_seconds: float = 15.0,
+) -> AppServerRateLimitsResult:
+    payload = _worker_payload(auth_json, timeout_seconds=timeout_seconds)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "app.codex_app_server_worker",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise CodexCLIError(f"Unable to start Codex rate-limit worker: {exc}") from exc
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(json.dumps(payload).encode("utf-8")),
+            timeout=max(timeout_seconds + 1.0, timeout_seconds),
+        )
+    except TimeoutError as exc:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise CodexCLIError("Codex rate-limit worker timed out") from exc
+
+    return _parse_worker_result(
+        stdout=stdout.decode("utf-8", errors="replace"),
+        stderr=stderr.decode("utf-8", errors="replace"),
+        returncode=process.returncode,
+    )
+
+
+def _worker_payload(auth_json: dict[str, Any], *, timeout_seconds: float) -> dict[str, Any]:
+    return {
+        "auth_json": auth_json,
+        "timeout_seconds": timeout_seconds,
+        "codex_bin": settings.codex_bin,
+    }
+
+
+def _parse_worker_result(
+    *,
+    stdout: str,
+    stderr: str,
+    returncode: int,
+) -> AppServerRateLimitsResult:
+    output = stdout.strip()
+    if not output:
+        message = stderr.strip() or f"worker exited with code {returncode}"
+        raise CodexCLIError(f"Codex rate-limit worker produced no output: {message}")
+    try:
+        payload = json.loads(output)
+    except ValueError as exc:
+        raise CodexCLIError(f"Codex rate-limit worker returned invalid JSON: {output}") from exc
+    if not isinstance(payload, dict):
+        raise CodexCLIError("Codex rate-limit worker response was not a JSON object")
+    if not payload.get("ok"):
+        error = str(payload.get("error") or stderr.strip() or "unknown worker failure").strip()
+        raise CodexCLIError(f"Codex rate-limit worker failed: {error}")
+    return AppServerRateLimitsResult(
+        account=payload.get("account") if isinstance(payload.get("account"), dict) else None,
+        rate_limits=payload.get("rate_limits"),
+        notifications=(
+            payload.get("notifications")
+            if isinstance(payload.get("notifications"), list)
+            else []
+        ),
+    )
 
 
 def start_login(capture_timeout_seconds: float = 1.2) -> LoginStartResult:
     global _LOGIN_STATE
 
-    auth_path = settings.codex_auth_file()
-    before_mtime = _mtime(auth_path)
+    if not settings.openai_client_id or not settings.openai_redirect_uri:
+        raise CodexCLIError("OPENAI_CLIENT_ID and OPENAI_REDIRECT_URI must be configured")
 
-    cmd = [settings.codex_cli_bin, "login"]
-    try:
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError as exc:
-        raise CodexCLIError(f"codex CLI binary not found: {settings.codex_cli_bin}") from exc
-    except OSError as exc:
-        raise CodexCLIError(f"Unable to start codex login: {exc}") from exc
-
-    out = ""
-    err = ""
-    try:
-        out, err = process.communicate(timeout=capture_timeout_seconds)
-        out = _to_text(out)
-        err = _to_text(err)
-        # Process ended quickly; still valid for non-interactive setups.
-    except subprocess.TimeoutExpired as exc:
-        out = _to_text(exc.stdout)
-        err = _to_text(exc.stderr)
-
-    combined = "\n".join(part for part in [out, err] if part).strip()
-    browser_url = _extract_first_url(combined)
+    flow = build_oauth_authorize_url(
+        auth_base_url=settings.openai_auth_url,
+        client_id=settings.openai_client_id,
+        redirect_uri=settings.openai_redirect_uri,
+        scope=settings.openai_scope,
+        id_token_add_organizations=settings.openai_id_token_add_organizations,
+        codex_cli_simplified_flow=settings.openai_codex_cli_simplified_flow,
+        originator=settings.openai_originator
+    )
 
     _LOGIN_STATE = _LoginState(
         started_at=datetime.now(timezone.utc),
-        before_mtime=before_mtime,
-        process=process,
-        browser_url=browser_url,
-        output_excerpt=(combined[:1000] if combined else None),
+        process=None,
+        browser_url=flow["authorize_url"],
+        output_excerpt=None,
+        oauth_state=flow["state"],
+        code_verifier=flow["code_verifier"],
+        redirect_uri=settings.openai_redirect_uri,
+        auth_updated_at=get_active_auth_updated_at(),
     )
-
-    instructions = (
-        "Codex login started. Complete the browser/device login flow if prompted. "
-        "Then call /auth/import-current."
-    )
-    if process.poll() is not None and process.returncode not in (0, None):
-        instructions = "codex login exited early. Check /auth/login/status for details."
 
     return LoginStartResult(
         started=True,
-        pid=process.pid,
+        pid=None,
         started_at=_LOGIN_STATE.started_at.isoformat(),
-        auth_path=str(auth_path),
-        browser_url=browser_url,
-        instructions=instructions,
-        output_excerpt=_LOGIN_STATE.output_excerpt,
+        auth_path="db://active-auth",
+        browser_url=flow["authorize_url"],
+        instructions=(
+            "OAuth login is ready. Open the URL, finish sign-in, and relay the callback URL "
+            "back to /auth/relay-callback."
+        ),
+        output_excerpt=None,
     )
 
 
 def get_login_status() -> LoginStatusResult:
-    auth_path = settings.codex_auth_file()
-    auth_exists = auth_path.exists()
+    auth_json = get_active_auth_json()
+    auth_exists = isinstance(auth_json, dict)
+    auth_path = "db://active-auth"
 
     if _LOGIN_STATE is None:
         return LoginStatusResult(
             status="idle",
             auth_exists=auth_exists,
             auth_updated=False,
-            auth_path=str(auth_path),
+            auth_path=auth_path,
             started_at=None,
             completed_at=None,
             browser_url=None,
             pid=None,
         )
 
-    updated = _has_auth_updated(_LOGIN_STATE.before_mtime, auth_path)
-    process = _LOGIN_STATE.process
+    updated_at = get_active_auth_updated_at()
+    updated = bool(updated_at and updated_at != _LOGIN_STATE.auth_updated_at)
 
     if updated:
         return LoginStatusResult(
             status="complete",
             auth_exists=True,
             auth_updated=True,
-            auth_path=str(auth_path),
+            auth_path=auth_path,
             started_at=_LOGIN_STATE.started_at.isoformat(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            completed_at=updated_at,
             browser_url=_LOGIN_STATE.browser_url,
-            pid=process.pid if process else None,
-        )
-
-    if process is not None:
-        rc = process.poll()
-        if rc is None:
-            return LoginStatusResult(
-                status="pending",
-                auth_exists=auth_exists,
-                auth_updated=False,
-                auth_path=str(auth_path),
-                started_at=_LOGIN_STATE.started_at.isoformat(),
-                completed_at=None,
-                browser_url=_LOGIN_STATE.browser_url,
-                pid=process.pid,
-            )
-        if rc == 0:
-            return LoginStatusResult(
-                status="pending",
-                auth_exists=auth_exists,
-                auth_updated=False,
-                auth_path=str(auth_path),
-                started_at=_LOGIN_STATE.started_at.isoformat(),
-                completed_at=None,
-                browser_url=_LOGIN_STATE.browser_url,
-                pid=process.pid,
-                error="codex login exited but auth.json has not changed yet",
-            )
-        return LoginStatusResult(
-            status="failed",
-            auth_exists=auth_exists,
-            auth_updated=False,
-            auth_path=str(auth_path),
-            started_at=_LOGIN_STATE.started_at.isoformat(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
-            browser_url=_LOGIN_STATE.browser_url,
-            pid=process.pid,
-            error=f"codex login exited with code {rc}",
+            pid=None,
         )
 
     return LoginStatusResult(
         status="pending",
         auth_exists=auth_exists,
         auth_updated=False,
-        auth_path=str(auth_path),
+        auth_path=auth_path,
         started_at=_LOGIN_STATE.started_at.isoformat(),
         completed_at=None,
         browser_url=_LOGIN_STATE.browser_url,
@@ -331,31 +562,19 @@ def get_login_status() -> LoginStatusResult:
 
 
 def read_current_auth() -> dict[str, Any]:
-    auth_path = settings.codex_auth_file()
-    if not auth_path.exists():
-        raise CodexCLIError(f"Auth file not found at {auth_path}")
-
-    try:
-        raw = auth_path.read_text()
-        parsed = json.loads(raw)
-    except OSError as exc:
-        raise CodexCLIError(f"Unable to read auth file: {exc}") from exc
-    except ValueError as exc:
-        raise CodexCLIError("Auth file is not valid JSON") from exc
-
+    parsed = get_active_auth_json()
     if not isinstance(parsed, dict):
-        raise CodexCLIError("Auth file JSON root must be an object")
-
+        raise CodexCLIError("Active auth not found in database")
     return parsed
 
 
 def wait_for_auth_update(timeout_seconds: int = 60, poll_interval_seconds: float = 1.0) -> bool:
-    auth_path = settings.codex_auth_file()
-    baseline = _mtime(auth_path)
+    baseline = get_active_auth_updated_at()
 
     deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
     while datetime.now(timezone.utc).timestamp() < deadline:
-        if _has_auth_updated(baseline, auth_path):
+        current = get_active_auth_updated_at()
+        if current and current != baseline:
             return True
         # Keep dependencies minimal and avoid busy spinning.
         import time
@@ -405,6 +624,60 @@ def derive_label(email: str, existing_labels: set[str] | None = None) -> str:
 
 
 def relay_callback_to_login(callback_payload: dict[str, Any]) -> dict[str, Any]:
+    global _LOGIN_STATE
+
+    if _LOGIN_STATE is not None and _LOGIN_STATE.code_verifier and _LOGIN_STATE.redirect_uri:
+        error = callback_payload.get("error")
+        if isinstance(error, str) and error.strip():
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": str(callback_payload.get("error_description") or error).strip(),
+            }
+
+        callback_state = str(callback_payload.get("state") or "").strip()
+        expected_state = str(_LOGIN_STATE.oauth_state or "").strip()
+        if expected_state and callback_state and callback_state != expected_state:
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": "Callback state did not match the active PKCE login session.",
+            }
+
+        code = str(callback_payload.get("code") or "").strip()
+        if not code:
+            return {
+                "attempted": False,
+                "supported": True,
+                "completed": False,
+                "message": "Missing authorization code in callback payload.",
+            }
+
+        try:
+            token_response = _exchange_code_for_token_sync(
+                code=code,
+                code_verifier=str(_LOGIN_STATE.code_verifier),
+                redirect_uri=str(_LOGIN_STATE.redirect_uri),
+            )
+            auth_json = build_auth_payload(token_response)
+            set_active_auth_json(auth_json)
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": True,
+                "message": "Callback exchanged and active auth updated in database.",
+                "auth_path": "db://active-auth",
+            }
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": f"Unable to exchange callback code: {exc}",
+            }
+
     full_url_raw = callback_payload.get("full_url")
     full_url = str(full_url_raw).strip() if isinstance(full_url_raw, str) else ""
     relay_url = full_url or _build_callback_url_from_payload(callback_payload)
@@ -472,6 +745,64 @@ def relay_callback_to_login(callback_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def relay_callback_to_login_async(callback_payload: dict[str, Any]) -> dict[str, Any]:
+    global _LOGIN_STATE
+
+    if _LOGIN_STATE is not None and _LOGIN_STATE.code_verifier and _LOGIN_STATE.redirect_uri:
+        error = callback_payload.get("error")
+        if isinstance(error, str) and error.strip():
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": str(callback_payload.get("error_description") or error).strip(),
+            }
+
+        callback_state = str(callback_payload.get("state") or "").strip()
+        expected_state = str(_LOGIN_STATE.oauth_state or "").strip()
+        if expected_state and callback_state and callback_state != expected_state:
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": "Callback state did not match the active PKCE login session.",
+            }
+
+        code = str(callback_payload.get("code") or "").strip()
+        if not code:
+            return {
+                "attempted": False,
+                "supported": True,
+                "completed": False,
+                "message": "Missing authorization code in callback payload.",
+            }
+
+        try:
+            token_response = await _exchange_code_for_token_async(
+                code=code,
+                code_verifier=str(_LOGIN_STATE.code_verifier),
+                redirect_uri=str(_LOGIN_STATE.redirect_uri),
+            )
+            auth_json = build_auth_payload(token_response)
+            set_active_auth_json(auth_json)
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": True,
+                "message": "Callback exchanged and active auth updated in database.",
+                "auth_path": "db://active-auth",
+            }
+        except Exception as exc:
+            return {
+                "attempted": True,
+                "supported": True,
+                "completed": False,
+                "message": f"Unable to exchange callback code: {exc}",
+            }
+
+    return relay_callback_to_login(callback_payload)
+
+
 def cancel_login() -> bool:
     global _LOGIN_STATE
     if _LOGIN_STATE is None:
@@ -493,6 +824,144 @@ def cancel_login() -> bool:
     except OSError:
         return False
     return False
+
+
+def _exchange_code_for_token_sync(
+    *,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+) -> dict[str, Any]:
+    if not settings.openai_token_url or not settings.openai_client_id:
+        raise CodexCLIError("OPENAI_TOKEN_URL and OPENAI_CLIENT_ID must be configured")
+
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": settings.openai_client_id,
+        "code": code,
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+    }
+    if settings.openai_client_secret:
+        data["client_secret"] = settings.openai_client_secret
+
+    body = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(
+        settings.openai_token_url,
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "codex-auth-manager/native-oauth",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20.0) as resp:
+            payload = _to_text(resp.read())
+    except urllib.error.HTTPError as exc:
+        detail = _to_text(exc.read())
+        raise CodexCLIError(detail or f"Token exchange failed with HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise CodexCLIError(f"Unable to reach token endpoint: {exc}") from exc
+
+    try:
+        parsed = json.loads(payload)
+    except ValueError as exc:
+        raise CodexCLIError("Token exchange returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise CodexCLIError("Token exchange response was not a JSON object")
+    return parsed
+
+
+async def _exchange_code_for_token_async(
+    *,
+    code: str,
+    code_verifier: str,
+    redirect_uri: str,
+) -> dict[str, Any]:
+    if not settings.openai_token_url or not settings.openai_client_id:
+        raise CodexCLIError("OPENAI_TOKEN_URL and OPENAI_CLIENT_ID must be configured")
+
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": settings.openai_client_id,
+        "code": code,
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+    }
+    if settings.openai_client_secret:
+        data["client_secret"] = settings.openai_client_secret
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                settings.openai_token_url,
+                data=data,
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "codex-auth-manager/native-oauth",
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise CodexCLIError(f"Unable to reach token endpoint: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise CodexCLIError(response.text.strip() or f"Token exchange failed with HTTP {response.status_code}")
+    try:
+        parsed = response.json()
+    except ValueError as exc:
+        raise CodexCLIError("Token exchange returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise CodexCLIError("Token exchange response was not a JSON object")
+    return parsed
+
+
+def _http_json_request(
+    url: str | None,
+    *,
+    headers: dict[str, str],
+    timeout_seconds: float,
+) -> Any:
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        raise CodexCLIError("Missing configured API URL")
+
+    req = urllib.request.Request(clean_url, method="GET", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+            payload = _to_text(resp.read())
+    except urllib.error.HTTPError as exc:
+        detail = _to_text(exc.read())
+        raise CodexCLIError(detail or f"API request failed with HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise CodexCLIError(f"Unable to reach API endpoint {clean_url}: {exc}") from exc
+
+    try:
+        return json.loads(payload)
+    except ValueError as exc:
+        raise CodexCLIError(f"API endpoint {clean_url} returned invalid JSON") from exc
+
+
+async def _http_json_request_async(
+    client: httpx.AsyncClient,
+    url: str | None,
+    *,
+    headers: dict[str, str],
+) -> Any:
+    clean_url = str(url or "").strip()
+    if not clean_url:
+        raise CodexCLIError("Missing configured API URL")
+    try:
+        response = await client.get(clean_url, headers=headers)
+    except httpx.HTTPError as exc:
+        raise CodexCLIError(f"Unable to reach API endpoint {clean_url}: {exc}") from exc
+    if response.status_code >= 400:
+        raise CodexCLIError(response.text.strip() or f"API request failed with HTTP {response.status_code}")
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise CodexCLIError(f"API endpoint {clean_url} returned invalid JSON") from exc
 
 
 def _find_first_key(payload: Any, keys: list[str]) -> str | None:
@@ -529,82 +998,12 @@ def _decode_jwt_payload(token: str) -> dict[str, Any] | None:
     return None
 
 
-def _extract_first_url(text: str) -> str | None:
-    if not text:
-        return None
-    urls = [_clean_url(match.group(0)) for match in URL_RE.finditer(text)]
-    urls = [url for url in urls if url]
-    if not urls:
-        return None
-
-    # Prefer the actual authorization URL over local callback/listener URLs.
-    for url in urls:
-        if "auth.openai.com/oauth/authorize" in url:
-            return url
-
-    return urls[0]
-
-
 def _to_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return value
-
-
-def _rpc_send(process: subprocess.Popen[str], message: dict[str, Any]) -> None:
-    if process.stdin is None:
-        raise CodexCLIError("codex app-server stdin is unavailable")
-    try:
-        process.stdin.write(json.dumps(message) + "\n")
-        process.stdin.flush()
-    except OSError as exc:
-        raise CodexCLIError(f"Failed writing to codex app-server: {exc}") from exc
-
-
-def _readline_with_timeout(
-    process: subprocess.Popen[str], timeout_seconds: float
-) -> str | None:
-    if process.stdout is None:
-        return None
-    end = time.monotonic() + timeout_seconds
-    while time.monotonic() < end:
-        line = process.stdout.readline()
-        if line:
-            return line
-        if process.poll() is not None:
-            return None
-        time.sleep(0.02)
-    return None
-
-
-def _rpc_error_text(method: str, error_obj: Any) -> str:
-    if isinstance(error_obj, dict):
-        message = error_obj.get("message")
-        code = error_obj.get("code")
-        if message is not None and code is not None:
-            return f"{method} failed ({code}): {message}"
-        if message is not None:
-            return f"{method} failed: {message}"
-    return f"{method} failed"
-
-
-def _drain_stderr(process: subprocess.Popen[str], max_lines: int = 20) -> list[str]:
-    if process.stderr is None:
-        return []
-    lines: list[str] = []
-    try:
-        for _ in range(max_lines):
-            line = process.stderr.readline()
-            if not line:
-                break
-            value = line.strip()
-            if value:
-                lines.append(value)
-    except OSError:
-        return lines
-    return lines
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:
@@ -624,10 +1023,6 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
                 process.wait(timeout=1.0)
             except subprocess.TimeoutExpired:
                 pass
-
-
-def _clean_url(url: str) -> str:
-    return url.rstrip(".,);]")
 
 
 def _build_callback_url_from_payload(callback_payload: dict[str, Any]) -> str | None:
@@ -666,19 +1061,3 @@ def _build_callback_url_from_payload(callback_payload: dict[str, Any]) -> str | 
             parsed.fragment,
         )
     )
-
-
-def _mtime(path: Path) -> float | None:
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return None
-
-
-def _has_auth_updated(before_mtime: float | None, auth_path: Path) -> bool:
-    if not auth_path.exists():
-        return False
-    if before_mtime is None:
-        return True
-    current_mtime = _mtime(auth_path)
-    return current_mtime is not None and current_mtime > before_mtime

@@ -1,5 +1,13 @@
 import type { AuthPayload } from './types.js'
 
+async function digestSha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, '0'))
+    .join('')
+}
+
 export function validateAuthPayload(payload: unknown): payload is AuthPayload {
   if (!payload || typeof payload !== 'object') {
     return false
@@ -36,4 +44,9 @@ export function prepareAuthPayloadForWrite(payload: AuthPayload, nowIso = new Da
     ...payload,
     last_refresh: payload.last_refresh || nowIso,
   }
+}
+
+export async function authPayloadFingerprint(payload: AuthPayload): Promise<string> {
+  const prepared = prepareAuthPayloadForWrite(payload, payload.last_refresh || new Date(0).toISOString())
+  return digestSha256Hex(JSON.stringify(prepared))
 }

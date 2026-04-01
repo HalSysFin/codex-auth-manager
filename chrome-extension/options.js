@@ -1,7 +1,8 @@
 const SETTINGS_KEY = "relaySettings";
 const DEFAULT_SETTINGS = {
   authManagerBaseUrl: "http://localhost:8080",
-  authManagerBearerToken: ""
+  authManagerBearerToken: "",
+  relayEnabled: true
 };
 
 const baseUrlEl = document.getElementById("baseUrl");
@@ -34,7 +35,11 @@ async function loadSettings() {
   const settings = {
     authManagerBaseUrl: saved.authManagerBaseUrl || DEFAULT_SETTINGS.authManagerBaseUrl,
     authManagerBearerToken:
-      saved.authManagerBearerToken || DEFAULT_SETTINGS.authManagerBearerToken
+      saved.authManagerBearerToken || DEFAULT_SETTINGS.authManagerBearerToken,
+    relayEnabled:
+      typeof saved.relayEnabled === "boolean"
+        ? saved.relayEnabled
+        : DEFAULT_SETTINGS.relayEnabled
   };
 
   baseUrlEl.value = settings.authManagerBaseUrl;

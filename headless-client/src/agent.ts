@@ -1,5 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import { AuthManagerClient, AuthManagerClientError } from '../../packages/lease-runtime/src/authManagerClient.js'
+import { authPayloadFingerprint } from '../../packages/lease-runtime/src/authPayload.js'
 import {
   deriveLeaseHealthState,
   needsReacquire,
@@ -22,7 +23,7 @@ import type {
   LeaseStatusResponse,
   RuntimeLeaseState,
 } from '../../packages/lease-runtime/src/types.js'
-import { authFileExists, appendLog, ensureConfigDir, readRecentLogs, writeAuthFile } from './fsStore.js'
+import { authFileExists, appendLog, ensureConfigDir, readAuthFile, readRecentLogs, writeAuthFile } from './fsStore.js'
 import { saveHeadlessState } from './fsStore.js'
 import type { HeadlessOutput, HeadlessStateDocument, HeadlessStatusSummary, ResolvedCliConfig } from './types.js'
 
@@ -61,6 +62,7 @@ export class HeadlessAgent {
       return this.statusSummary()
     }
     try {
+      await this.reconcileLocalAuthIfNeeded(this.document.lease.leaseId)
       const status = await this.client.getLease(this.document.lease.leaseId)
       this.backendReachable = true
       this.document.lease = updateRuntimeStateFromLeaseStatus(this.document.lease, status)
@@ -107,6 +109,7 @@ export class HeadlessAgent {
     }
     await this.log(`Refreshing lease ${this.document.lease.leaseId}`)
     try {
+      await this.reconcileLocalAuthIfNeeded(this.document.lease.leaseId)
       const status = await this.client.getLease(this.document.lease.leaseId)
       this.backendReachable = true
       this.document.lease = updateRuntimeStateFromLeaseStatus(this.document.lease, status)
@@ -252,6 +255,7 @@ export class HeadlessAgent {
     try {
       await this.client.postTelemetry(this.document.lease.leaseId, buildLeaseTelemetryPayload(this.document.lease))
       this.backendReachable = true
+      await this.reconcileLocalAuthIfNeeded(this.document.lease.leaseId)
       const status = await this.client.getLease(this.document.lease.leaseId)
       this.document.lease = updateRuntimeStateFromLeaseStatus(this.document.lease, status)
       if (this.shouldRematerializeAuth(status)) {
@@ -315,10 +319,45 @@ export class HeadlessAgent {
       throw new Error(materialized.reason || 'Backend did not return auth payload for this lease')
     }
     const result = await writeAuthFile(this.config.settings.authFilePath, materialized.credential_material.auth_json)
-    this.document.lease = recordAuthWrite(this.document.lease, result.writtenAt)
+    const fingerprint = await authPayloadFingerprint(materialized.credential_material.auth_json)
+    this.document.lease = recordAuthWrite(this.document.lease, result.writtenAt, fingerprint)
     await this.log(`Wrote auth file to ${result.path}`)
     if (materialized.lease) {
       this.document.lease = updateRuntimeStateFromLease(this.document.lease, materialized.lease)
+    }
+  }
+
+  private async reconcileLocalAuthIfNeeded(leaseId: string | null): Promise<void> {
+    if (!leaseId) {
+      return
+    }
+    const localAuth = await readAuthFile(this.config.settings.authFilePath)
+    if (!localAuth) {
+      return
+    }
+    const fingerprint = await authPayloadFingerprint(localAuth)
+    if (this.document.lease.lastAuthFingerprint && this.document.lease.lastAuthFingerprint === fingerprint) {
+      return
+    }
+    const reconciled = await this.client.reconcileLeaseAuth(leaseId, {
+      machineId: this.config.settings.machineId,
+      agentId: this.config.settings.agentId,
+      authJson: localAuth,
+    })
+    if (reconciled.credential_auth_updated_at) {
+      this.document.lease = { ...this.document.lease, credentialAuthUpdatedAt: reconciled.credential_auth_updated_at }
+    }
+    if (reconciled.decision === 'manager_updated_client' && reconciled.auth_json) {
+      await this.log(`Manager auth is newer for lease ${leaseId}; rewriting local auth file`)
+      const result = await writeAuthFile(this.config.settings.authFilePath, reconciled.auth_json)
+      const managerFingerprint = await authPayloadFingerprint(reconciled.auth_json)
+      this.document.lease = recordAuthWrite(this.document.lease, result.writtenAt, managerFingerprint)
+      return
+    }
+    const acknowledgedAt = reconciled.credential_auth_updated_at || localAuth.last_refresh || new Date().toISOString()
+    this.document.lease = recordAuthWrite(this.document.lease, acknowledgedAt, fingerprint)
+    if (reconciled.decision === 'client_updated_manager') {
+      await this.log(`Uploaded fresher local auth to manager for lease ${leaseId}`)
     }
   }
 

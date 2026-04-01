@@ -49,12 +49,6 @@
       <p>The localhost callback could not be relayed to auth-manager.</p>
       <code id="reason">Unknown error</code>
     </div>
-    <script>
-      const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
-      const reason = hash.get("reason");
-      if (reason) {
-        document.getElementById("reason").textContent = decodeURIComponent(reason);
-      }
-    </script>
+    <script src="page-status.js"></script>
   </body>
 </html>

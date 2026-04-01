@@ -94,6 +94,8 @@ The client never logs token contents.
 - renews near expiry if auto-renew is enabled
 - rotates or reacquires when replacement is required or the lease is no longer usable
 - rewrites `~/.codex/auth.json` after successful materialization
+- reconciles local `~/.codex/auth.json` changes back to Auth Manager when Codex refreshes auth outside the agent
+- rewrites local auth automatically when the manager has newer tokens
 
 ## Installation
 

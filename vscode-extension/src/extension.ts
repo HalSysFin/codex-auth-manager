@@ -1,7 +1,8 @@
 import * as vscode from 'vscode'
 import * as os from 'node:os'
 import { AuthManagerClient, AuthManagerClientError, type AuthPayload, type LeaseStatusResponse } from './authManagerClient'
-import { authFileExists, deleteAuthFile, writeAuthFile } from './authFile'
+import { authFileExists, deleteAuthFile, readAuthFile, writeAuthFile } from './authFile'
+import { authPayloadFingerprint } from '../../packages/lease-runtime/src/authPayload.js'
 import {
   deriveLeaseHealthState,
   selectStartupAction,
@@ -287,6 +288,7 @@ class AuthManagerController {
       }
       let status: LeaseStatusResponse
       try {
+        await this.reconcileLocalAuthIfNeeded(this.state.leaseId)
         status = await this.client.getLease(this.state.leaseId)
         this.backendReachable = true
       } catch (error) {
@@ -342,6 +344,7 @@ class AuthManagerController {
     }
     this.log(`Refreshing lease state (${origin})`)
     try {
+      await this.reconcileLocalAuthIfNeeded(this.state.leaseId)
       const status = await this.client.getLease(this.state.leaseId)
       this.backendReachable = true
       this.state = await this.stateStore.updateFromLeaseStatus(this.state, status)
@@ -639,9 +642,42 @@ class AuthManagerController {
 
   private async writePayloadToAuthFile(payload: AuthPayload): Promise<void> {
     const result = await writeAuthFile(this.authFilePath(), payload)
+    const fingerprint = await authPayloadFingerprint(payload)
     this.state = { ...this.state, authFilePath: this.authFilePath() }
-    this.state = await this.stateStore.recordAuthWrite(this.state, result.writtenAt)
+    this.state = await this.stateStore.recordAuthWrite(this.state, result.writtenAt, fingerprint)
     this.log(`Wrote auth file to ${result.path}`)
+  }
+
+  private async reconcileLocalAuthIfNeeded(leaseId: string | null): Promise<void> {
+    if (!leaseId) {
+      return
+    }
+    const localAuth = await readAuthFile(this.authFilePath())
+    if (!localAuth) {
+      return
+    }
+    const fingerprint = await authPayloadFingerprint(localAuth)
+    if (this.state.lastAuthFingerprint && this.state.lastAuthFingerprint === fingerprint) {
+      return
+    }
+    const reconciled = await this.client.reconcileLeaseAuth(leaseId, {
+      machineId: this.state.machineId,
+      agentId: this.state.agentId,
+      authJson: localAuth,
+    })
+    if (reconciled.credential_auth_updated_at) {
+      this.state = { ...this.state, credentialAuthUpdatedAt: reconciled.credential_auth_updated_at }
+    }
+    if (reconciled.decision === 'manager_updated_client' && reconciled.auth_json) {
+      this.log(`Manager auth is newer for lease ${leaseId}; rewriting local auth file`)
+      await this.writePayloadToAuthFile(reconciled.auth_json)
+      return
+    }
+    const acknowledgedAt = reconciled.credential_auth_updated_at || localAuth.last_refresh || new Date().toISOString()
+    this.state = await this.stateStore.recordAuthWrite(this.state, acknowledgedAt, fingerprint)
+    if (reconciled.decision === 'client_updated_manager') {
+      this.log(`Uploaded fresher local auth to manager for lease ${leaseId}`)
+    }
   }
 
   private async postTelemetry(): Promise<void> {

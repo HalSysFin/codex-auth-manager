@@ -8,6 +8,8 @@ This extension connects VS Code directly to Codex Auth Manager so the editor can
 - materializes the leased auth payload into `~/.codex/auth.json`
 - refreshes and renews the lease in the background
 - rotates or reacquires when the active lease is no longer usable
+- reconciles local `~/.codex/auth.json` changes back to Auth Manager when Codex refreshes auth on its own
+- pulls fresher auth back down when the manager refreshed first
 - posts lightweight lease telemetry back to Codex Auth Manager
 - shows current lease and account state in the activity bar view and status bar
 - supports Remote SSH / remote workspace identity so different remote hosts do not collapse into one machine
@@ -32,6 +34,7 @@ The extension expects these manager endpoints:
 - `POST /api/leases/{lease_id}/telemetry`
 - `POST /api/leases/rotate`
 - `POST /api/leases/{lease_id}/materialize`
+- `POST /api/leases/{lease_id}/reconcile-auth`
 
 Manager auth is sent as:
 

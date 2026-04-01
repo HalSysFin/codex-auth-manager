@@ -1,6 +1,6 @@
 {
   "name": "openclaw-auth-manager-plugin",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "description": "Plugin-ready Auth Manager lease telemetry module for OpenClaw.",
   "openclaw": {

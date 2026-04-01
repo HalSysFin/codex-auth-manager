@@ -5,8 +5,6 @@ import hmac
 import ipaddress
 import json
 import os
-import tempfile
-import subprocess
 import hashlib
 import logging
 import re
@@ -39,6 +37,8 @@ from .account_usage_store import (
     delete_account_data,
     ensure_account,
     delete_saved_profile,
+    get_active_auth_json,
+    get_active_auth_updated_at,
     get_saved_profile,
     get_account,
     get_active_profile_label,
@@ -59,10 +59,12 @@ from .account_usage_store import (
     record_absolute_usage_snapshot,
     record_percentage_snapshot,
     reconcile_due_accounts,
+    set_active_auth_json,
     set_active_profile_label,
     sync_account_rate_limit_percentages,
     sync_account_usage_snapshot,
     touch_profile_last_used,
+    update_saved_profile_reauth_status,
     update_runtime_settings,
     upsert_saved_profile,
 )
@@ -89,26 +91,25 @@ from .lease_broker_store import (
 )
 from .auth_store import (
     AuthStoreError,
+    AuthStoreSwitchError,
     persist_and_save_label,
+    get_current_auth_label,
+    list_auth_labels,
     persist_current_auth,
     save_current_auth_under_label,
+    switch_active_auth_to_label,
 )
 from .codex_cli import (
     CodexCLIError,
     cancel_login,
     derive_label,
     get_login_status,
-    read_rate_limits_via_app_server,
+    read_rate_limits_for_auth_async,
+    read_rate_limits_via_app_server_async,
     read_current_auth,
-    relay_callback_to_login,
+    relay_callback_to_login_async,
     start_login,
     wait_for_auth_update,
-)
-from .codex_switch import (
-    CodexSwitchError,
-    current_label,
-    list_labels,
-    switch_label,
 )
 from .config import settings
 from .login_sessions import (
@@ -121,8 +122,9 @@ from .login_sessions import (
     to_public_session,
     validate_relay_token,
 )
+from .oauth_flow import build_auth_payload
 
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 GITHUB_REPO = "HalSysFin/Codex-Auth-Manager"
 _VERSION_CHECK_CACHE: dict[str, Any] = {
     "checked_at": None,
@@ -140,6 +142,7 @@ _USAGE_STALE_SECONDS = 1800
 _reconcile_task: asyncio.Task[None] | None = None
 _lease_reconcile_task: asyncio.Task[None] | None = None
 _auth_keepalive_task: asyncio.Task[None] | None = None
+_rate_limit_sync_task: asyncio.Task[None] | None = None
 LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 _LAST_REFRESH_STATUS_BY_KEY: dict[str, dict[str, Any]] = {}
@@ -231,16 +234,95 @@ def _access_token_expired(auth_json: dict[str, Any] | None) -> bool:
     return datetime.fromtimestamp(float(exp), tz=timezone.utc) <= datetime.now(timezone.utc)
 
 
+def _access_token_expiry_ts(auth_json: dict[str, Any] | None) -> int | None:
+    if not isinstance(auth_json, dict):
+        return None
+    access_token = extract_access_token(auth_json)
+    if not access_token:
+        return None
+    claims = decode_jwt_claims(access_token)
+    if not claims:
+        return None
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)):
+        return None
+    return int(exp)
+
+
+def _access_token_expiry_payload(auth_json: dict[str, Any] | None) -> dict[str, Any]:
+    exp_ts = _access_token_expiry_ts(auth_json)
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    if exp_ts is None:
+        return {
+            "access_token_expires_at": None,
+            "access_token_expires_in_seconds": None,
+            "access_token_expired": False,
+        }
+    expires_at = datetime.fromtimestamp(exp_ts, tz=timezone.utc).isoformat()
+    return {
+        "access_token_expires_at": expires_at,
+        "access_token_expires_in_seconds": exp_ts - now_ts,
+        "access_token_expired": exp_ts <= now_ts,
+    }
+
+
+def _decoded_token_payload(auth_json: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(auth_json, dict):
+        return {
+            "access": None,
+            "id": None,
+            "refresh": None,
+        }
+
+    access_token = extract_access_token(auth_json)
+    id_token = extract_id_token(auth_json)
+    refresh_token = extract_refresh_token(auth_json)
+
+    def _token_info(token: str | None) -> dict[str, Any] | None:
+        if not isinstance(token, str) or not token.strip():
+            return None
+        claims = decode_jwt_claims(token)
+        exp = claims.get("exp") if isinstance(claims, dict) else None
+        exp_iso = None
+        if isinstance(exp, (int, float)) and exp > 0:
+            exp_iso = datetime.fromtimestamp(int(exp), tz=timezone.utc).isoformat()
+        return {
+            "is_jwt": bool(isinstance(claims, dict)),
+            "expires_at": exp_iso,
+            "claims": claims if isinstance(claims, dict) else None,
+        }
+
+    return {
+        "access": _token_info(access_token),
+        "id": _token_info(id_token),
+        "refresh": _token_info(refresh_token),
+    }
+
+
+def _saved_profile_token_metadata(profile: AccountProfile) -> dict[str, Any]:
+    return {
+        "access_token_expires_at": profile.access_token_expires_at,
+        "id_token_expires_at": profile.id_token_expires_at,
+        "refresh_token_expires_at": profile.refresh_token_expires_at,
+        "last_refresh_at": profile.last_refresh_at,
+        "refresh_token_present": profile.refresh_token_present,
+        "reauth_required": profile.reauth_required,
+        "reauth_reason": profile.reauth_reason,
+    }
+
+
 def _profile_reauth_requirement(
     profile: AccountProfile,
     refresh_status: dict[str, Any] | None,
 ) -> tuple[bool, str | None]:
-    status = refresh_status or {}
-    if status.get("reauth_required"):
-        return True, str(status.get("last_error") or "Reauthentication required")
     auth_json = profile.auth if isinstance(profile.auth, dict) else {}
     if not _access_token_expired(auth_json):
         return False, None
+    status = refresh_status or {}
+    if status.get("reauth_required"):
+        return True, str(status.get("last_error") or "Reauthentication required")
+    if profile.reauth_required:
+        return True, profile.reauth_reason or "Reauthentication required"
     has_refresh = bool(extract_refresh_token(auth_json))
     if not has_refresh:
         return True, "Access token expired and no refresh token is available."
@@ -357,12 +439,15 @@ async def on_startup() -> None:
     global _reconcile_task
     global _lease_reconcile_task
     global _auth_keepalive_task
+    global _rate_limit_sync_task
     if _reconcile_task is None:
         _reconcile_task = asyncio.create_task(_periodic_reconcile_usage_windows())
     if _lease_reconcile_task is None:
         _lease_reconcile_task = asyncio.create_task(_periodic_reconcile_broker_leases())
-    if _auth_keepalive_task is None:
+    if settings.auth_keepalive_in_app and _auth_keepalive_task is None:
         _auth_keepalive_task = asyncio.create_task(_periodic_refresh_saved_auths())
+    if _rate_limit_sync_task is None:
+        _rate_limit_sync_task = asyncio.create_task(_periodic_refresh_profile_rate_limits())
 
 
 @app.on_event("shutdown")
@@ -370,6 +455,7 @@ async def on_shutdown() -> None:
     global _reconcile_task
     global _lease_reconcile_task
     global _auth_keepalive_task
+    global _rate_limit_sync_task
     if _reconcile_task is not None:
         _reconcile_task.cancel()
         with suppress(asyncio.CancelledError):
@@ -385,6 +471,11 @@ async def on_shutdown() -> None:
         with suppress(asyncio.CancelledError):
             await _auth_keepalive_task
         _auth_keepalive_task = None
+    if _rate_limit_sync_task is not None:
+        _rate_limit_sync_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _rate_limit_sync_task
+        _rate_limit_sync_task = None
 
 
 async def _periodic_reconcile_usage_windows() -> None:
@@ -420,6 +511,21 @@ async def _periodic_refresh_saved_auths() -> None:
                 _sync_broker_credentials_from_profiles()
         except Exception:
             logger.exception("auth keepalive failed")
+
+
+async def _periodic_refresh_profile_rate_limits() -> None:
+    while True:
+        await asyncio.sleep(max(int(settings.rate_limit_sync_interval_seconds), 60))
+        try:
+            refreshed, failed = await _refresh_all_profile_rate_limits()
+            if refreshed or failed:
+                logger.info(
+                    "profile rate-limit sync completed refreshed=%s failed=%s",
+                    refreshed,
+                    failed,
+                )
+        except Exception:
+            logger.exception("profile rate-limit sync failed")
 
 
 @app.middleware("http")
@@ -691,7 +797,7 @@ async def auth_login_status(wait_seconds: int = 0, session_id: str | None = None
                         "error": str(exc),
                     }
                 )
-        except (CodexCLIError, AuthStoreError, CodexSwitchError) as exc:
+        except (CodexCLIError, AuthStoreError, AuthStoreSwitchError) as exc:
             logger.warning("auto persist after auth update failed: %s", exc)
             auto_persist.update(
                 {
@@ -869,7 +975,7 @@ async def auth_relay_callback(payload: dict[str, Any]) -> JSONResponse:
         )
 
     _store_callback({"type": "relay_callback", "session_id": session_id, "payload": callback_payload})
-    handoff = relay_callback_to_login(callback_payload)
+    handoff = await relay_callback_to_login_async(callback_payload)
     logger.info(
         "relay-callback accepted session_id=%s provider_error=%s handoff_supported=%s",
         session_id,
@@ -877,11 +983,71 @@ async def auth_relay_callback(payload: dict[str, Any]) -> JSONResponse:
         bool(handoff.get("supported")),
     )
 
+    auto_persist: dict[str, Any] = {"attempted": False}
+    if bool(handoff.get("completed")) and not error:
+        auto_persist["attempted"] = True
+        try:
+            current_auth = read_current_auth()
+            auth_validation = _validate_relay_finalized_auth(
+                current_auth,
+                started_at_iso=updated.created_at.isoformat() if updated.created_at else None,
+            )
+            auto_persist["auth_validation"] = auth_validation
+            if not auth_validation.get("ok"):
+                auto_persist.update(
+                    {
+                        "status": "error",
+                        "reason": "auth_not_fresh",
+                        "error": auth_validation.get("message"),
+                    }
+                )
+                raise ValueError("Relay auth payload is stale or expired")
+
+            desired_label = payload.get("label")
+            persist_result = _persist_current_auth_to_profile(
+                desired_label=(str(desired_label) if desired_label is not None else None),
+                create_if_missing=True,
+                auth_json=current_auth,
+            )
+            auto_persist.update(
+                {
+                    "status": "persisted" if persist_result.persisted else "skipped",
+                    "reason": persist_result.reason,
+                    "label": persist_result.label,
+                    "account_key": persist_result.account_key,
+                    "email": persist_result.email,
+                    "matched_existing_profile": persist_result.matched_existing_profile,
+                    "created_new_profile": persist_result.created_new_profile,
+                    "up_to_date": persist_result.up_to_date,
+                    "saved": persist_result.persisted or persist_result.up_to_date,
+                    "codex_switch": persist_result.codex_switch,
+                }
+            )
+        except ValueError as exc:
+            if auto_persist.get("status") != "error":
+                auto_persist.update(
+                    {
+                        "status": "error",
+                        "reason": "persist_failed",
+                        "error": str(exc),
+                    }
+                )
+        except (CodexCLIError, AuthStoreError, AuthStoreSwitchError) as exc:
+            logger.warning("auto persist during relay callback failed: %s", exc)
+            auto_persist.update(
+                {
+                    "status": "error",
+                    "reason": "persist_failed",
+                    "error": str(exc),
+                }
+            )
+
     return JSONResponse(
         {
             "status": "callback_received",
             "session": to_public_session(updated),
             "handoff": handoff,
+            "auto_persist": auto_persist,
         }
     )
 
@@ -900,7 +1066,7 @@ async def import_current_auth(request: Request, payload: dict[str, Any] | None =
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except CodexCLIError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (AuthStoreError, CodexSwitchError) as exc:
+    except (AuthStoreError, AuthStoreSwitchError) as exc:
         raise _to_switch_http_error(exc) from exc
 
     return JSONResponse(
@@ -935,7 +1101,7 @@ async def import_auth_json(request: Request, payload: dict[str, Any] | None = No
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (AuthStoreError, CodexSwitchError) as exc:
+    except (AuthStoreError, AuthStoreSwitchError) as exc:
         raise _to_switch_http_error(exc) from exc
 
     return JSONResponse(
@@ -964,13 +1130,13 @@ async def auth_switch(request: Request, payload: dict[str, Any]) -> JSONResponse
     switched_account_key = profile.account_key if profile is not None else None
 
     try:
-        result = switch_label(label)
+        result = switch_active_auth_to_label(label)
         now_current = _resolve_current_label(read_current_auth(), list_profiles())
         if profile is not None:
             _touch_account_usage(profile=profile)
             with suppress(Exception):
                 _persist_active_auth_db_copy(profile.label)
-    except CodexSwitchError as exc:
+    except AuthStoreSwitchError as exc:
         raise _to_switch_http_error(exc) from exc
     except CodexCLIError:
         now_current = None
@@ -1072,8 +1238,8 @@ async def auth_rename(request: Request, payload: dict[str, Any]) -> JSONResponse
     now_current = None
     was_current = False
     try:
-        was_current = (get_active_profile_label() or current_label()) == old_label
-    except CodexSwitchError:
+        was_current = (get_active_profile_label() or get_current_auth_label()) == old_label
+    except AuthStoreSwitchError:
         was_current = False
     if was_current:
         set_active_profile_label(new_label)
@@ -1092,8 +1258,7 @@ async def auth_rename(request: Request, payload: dict[str, Any]) -> JSONResponse
 
 @app.get("/auth/current")
 async def auth_current() -> JSONResponse:
-    auth_path = settings.codex_auth_file()
-    meta = _auth_file_metadata(auth_path)
+    meta = _auth_file_metadata()
 
     if not meta["exists"]:
         return JSONResponse(
@@ -1121,6 +1286,8 @@ async def auth_current() -> JSONResponse:
             }
         )
 
+    expiry_payload = _access_token_expiry_payload(auth_json)
+
     return JSONResponse(
         {
             "auth": meta,
@@ -1129,6 +1296,10 @@ async def auth_current() -> JSONResponse:
             "current_label": current,
             "current_display_label": _display_label(current, email),
             "status": "ok",
+            "last_refresh": auth_json.get("last_refresh"),
+            "has_refresh_token": bool(extract_refresh_token(auth_json)),
+            "decoded_tokens": _decoded_token_payload(auth_json),
+            **expiry_payload,
         }
     )
 
@@ -1137,7 +1308,19 @@ async def auth_current() -> JSONResponse:
 async def auth_rate_limits(request: Request) -> JSONResponse:
     _require_internal_auth(request)
     try:
-        result = read_rate_limits_via_app_server()
+        active_auth = read_current_auth()
+        if (
+            isinstance(active_auth, dict)
+            and extract_refresh_token(active_auth)
+            and _refresh_keepalive_supported()
+        ):
+            # Ensure we attempt a refresh through the CLI once the access token is dead.
+            if _auth_access_token_expiring_soon(active_auth, leeway_seconds=0):
+                await _refresh_active_auth_if_needed(active_auth)
+    except CodexCLIError:
+        pass
+    try:
+        result = await read_rate_limits_via_app_server_async()
     except CodexCLIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -1171,7 +1354,7 @@ async def auth_rate_limits(request: Request) -> JSONResponse:
 
     return JSONResponse(
         {
-            "source": "codex_app_server",
+            "source": "openai_api",
             "account": result.account,
             "rate_limits": result.rate_limits,
             "notifications": result.notifications,
@@ -1223,26 +1406,31 @@ async def exchange_code(request: Request, payload: dict[str, Any]) -> JSONRespon
         )
 
     token_response = await _exchange_code_for_token(str(code), str(code_verifier), redirect_uri)
+    auth_payload = build_auth_payload(token_response)
 
     stored_at = _store_callback(
         {
             "type": "token_response",
             "received_at": datetime.now(timezone.utc).isoformat(),
             "token_response": token_response,
+            "auth_json": auth_payload,
         }
     )
 
     if label:
-        _persist_auth_and_save(str(label), token_response)
+        _persist_auth_and_save(str(label), auth_payload)
         return JSONResponse(
             {
                 "stored_at": str(stored_at),
                 "saved_label": str(label),
+                "auth_json": auth_payload,
                 "token_response": token_response,
             }
         )
 
-    return JSONResponse({"stored_at": str(stored_at), "token_response": token_response})
+    return JSONResponse(
+        {"stored_at": str(stored_at), "auth_json": auth_payload, "token_response": token_response}
+    )
 
 
 @app.get("/api/accounts")
@@ -1495,6 +1683,85 @@ async def api_lease_materialize(request: Request, lease_id: str, payload: dict[s
         reason="credential_material_delivered",
     )
     return JSONResponse({"status": "ok", "reason": None, "lease": lease, "credential_material": material})
+
+
+@app.post("/api/leases/{lease_id}/reconcile-auth")
+async def api_lease_reconcile_auth(request: Request, lease_id: str, payload: dict[str, Any]) -> JSONResponse:
+    _require_internal_auth(request)
+    _sync_broker_credentials_from_profiles()
+    machine_id = str(payload.get("machine_id") or "").strip()
+    agent_id = str(payload.get("agent_id") or "").strip()
+    incoming_auth = payload.get("auth_json")
+    if not machine_id or not agent_id:
+        raise HTTPException(status_code=400, detail="machine_id and agent_id are required")
+    if not isinstance(incoming_auth, dict):
+        raise HTTPException(status_code=400, detail="auth_json object is required")
+
+    lease_status = get_broker_lease_status(lease_id)
+    if lease_status is None:
+        raise HTTPException(status_code=404, detail="Lease not found")
+    if (
+        str(lease_status.get("machine_id") or "") != machine_id
+        or str(lease_status.get("agent_id") or "") != agent_id
+    ):
+        raise HTTPException(status_code=409, detail="Lease not found or not owned")
+
+    profile = _leased_profile_payload_for_credential(
+        str(lease_status.get("credential_id") or ""),
+        label_hint="",
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail="credential_material_not_found")
+
+    current_auth = profile.get("auth_json") if isinstance(profile.get("auth_json"), dict) else None
+    comparison = _compare_auth_freshness(current_auth, incoming_auth)
+    current_label = str(profile.get("label") or "").strip() or None
+    current_auth_updated_at = str(lease_status.get("credential_auth_updated_at") or "") or None
+
+    if comparison > 0:
+        persist_result = _persist_current_auth_to_profile(
+            desired_label=current_label,
+            create_if_missing=False,
+            auth_json=incoming_auth,
+        )
+        if current_label and get_active_profile_label() == current_label:
+            set_active_auth_json(incoming_auth)
+        _sync_broker_credentials_from_profiles()
+        refreshed = get_broker_lease_status(lease_id) or lease_status
+        return JSONResponse(
+            {
+                "status": "ok",
+                "decision": "client_updated_manager",
+                "reason": persist_result.reason,
+                "profile_label": persist_result.label,
+                "credential_auth_updated_at": refreshed.get("credential_auth_updated_at"),
+                "auth_json": None,
+            }
+        )
+
+    if comparison < 0 and isinstance(current_auth, dict):
+        refreshed = get_broker_lease_status(lease_id) or lease_status
+        return JSONResponse(
+            {
+                "status": "ok",
+                "decision": "manager_updated_client",
+                "reason": "manager_auth_newer",
+                "profile_label": current_label,
+                "credential_auth_updated_at": refreshed.get("credential_auth_updated_at") or current_auth_updated_at,
+                "auth_json": current_auth,
+            }
+        )
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "decision": "in_sync",
+            "reason": "auth_in_sync",
+            "profile_label": current_label,
+            "credential_auth_updated_at": current_auth_updated_at,
+            "auth_json": None,
+        }
+    )
 
 
 @app.post("/api/leases/rotate")
@@ -1882,19 +2149,25 @@ async def api_accounts_stream(request: Request) -> StreamingResponse:
             return
 
         latest_by_label = {item["label"]: dict(item) for item in snapshot["accounts"]}
-        baseline_auth = _safe_read_current_auth()
-        baseline_label = get_active_profile_label()
         completed = 0
         failed = 0
 
-        try:
-            for profile in profiles:
-                account_payload, ok = _refresh_profile_session_limits(
+        semaphore = asyncio.Semaphore(max(int(settings.live_refresh_concurrency), 1))
+
+        async def _run_profile(profile: AccountProfile) -> tuple[str, dict[str, Any], bool]:
+            async with semaphore:
+                account_payload, ok = await _refresh_profile_session_limits(
                     profile,
                     current_label_name=snapshot["current_label"],
+                    timeout_seconds=float(settings.live_rate_limit_worker_timeout_seconds),
                 )
+                return profile.label, account_payload, ok
 
-                latest_by_label[profile.label] = account_payload
+        tasks = [asyncio.create_task(_run_profile(profile)) for profile in profiles]
+        try:
+            for task in asyncio.as_completed(tasks):
+                label, account_payload, ok = await task
+                latest_by_label[label] = account_payload
                 completed += 1
                 if not ok:
                     failed += 1
@@ -1905,9 +2178,9 @@ async def api_accounts_stream(request: Request) -> StreamingResponse:
                         if isinstance(maybe_error, str):
                             error_msg = maybe_error
                     yield _sse_event(
-                        "error",
+                        "account_error",
                         {
-                            "label": profile.label,
+                            "label": label,
                             "account_key": account_payload.get("account_key"),
                             "message": error_msg,
                         },
@@ -1916,14 +2189,9 @@ async def api_accounts_stream(request: Request) -> StreamingResponse:
                 yield _sse_event("account_update", {"account": account_payload, "ok": ok})
                 yield _sse_event("aggregate_update", aggregate)
         finally:
-            if baseline_auth is not None:
-                try:
-                    persist_current_auth(baseline_auth)
-                except AuthStoreError:
-                    pass
-            if baseline_label:
-                with suppress(Exception):
-                    set_active_profile_label(baseline_label)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
 
         _mark_refresh_completed()
         yield _sse_event("complete", {"completed": completed, "failed": failed})
@@ -1938,10 +2206,8 @@ async def api_account_usage_history(request: Request, label: str) -> JSONRespons
     if profile is None:
         raise HTTPException(status_code=404, detail="Label not found")
 
-    # Refresh usage snapshot using the same app-server session limits path as stream refresh.
-    baseline_auth = _safe_read_current_auth()
-    session_limits_by_label = _fetch_session_limits_for_profiles([profile], baseline_auth)
-    rate_info = session_limits_by_label.get(profile.label)
+    # Refresh usage snapshot using the same per-profile worker path as stream refresh.
+    rate_info = await _fetch_session_limits_for_profile(profile)
     if isinstance(rate_info, dict) and not isinstance(rate_info.get("error"), str):
         _sync_profile_usage_from_session_limits(profile, rate_info)
 
@@ -2807,7 +3073,7 @@ async def api_account_snapshots(request: Request, label: str) -> JSONResponse:
 @app.get("/api/public-stats")
 async def api_public_stats() -> JSONResponse:
     profiles = _dedupe_profiles(list_profiles())
-    auth_meta = _auth_file_metadata(settings.codex_auth_file())
+    auth_meta = _auth_file_metadata()
     login = get_login_status()
 
     profiles_with_tokens = sum(1 for p in profiles if bool(p.access_token))
@@ -2861,12 +3127,12 @@ async def internal_auths(request: Request, label: str | None = None) -> JSONResp
 def _persist_auth_and_save(label: str, auth_json: Any) -> None:
     try:
         persist_and_save_label(label, auth_json)
-    except (AuthStoreError, CodexSwitchError) as exc:
+    except (AuthStoreError, AuthStoreSwitchError) as exc:
         raise _to_switch_http_error(exc) from exc
 
 
 def _to_switch_http_error(exc: Exception) -> HTTPException:
-    if isinstance(exc, CodexSwitchError):
+    if isinstance(exc, AuthStoreSwitchError):
         return HTTPException(
             status_code=500,
             detail={
@@ -3002,7 +3268,7 @@ def _auth_access_token_expiring_soon(
     if not claims:
         return False
     exp = claims.get("exp")
-    if not isinstance(exp, int):
+    if not isinstance(exp, (int, float)):
         return False
     now_ts = int(datetime.now(timezone.utc).timestamp())
     return exp <= now_ts + max(int(leeway_seconds), 0)
@@ -3040,27 +3306,7 @@ async def _refresh_saved_auth_via_refresh_token(profile: AccountProfile) -> bool
     if not isinstance(token_response, dict):
         raise RuntimeError("Unexpected refresh token response format")
 
-    next_auth = json.loads(json.dumps(auth_json))
-    tokens = next_auth.get("tokens")
-    if not isinstance(tokens, dict):
-        tokens = {}
-        next_auth["tokens"] = tokens
-
-    access_token = token_response.get("access_token")
-    if isinstance(access_token, str) and access_token.strip():
-        tokens["access_token"] = access_token.strip()
-    refresh_out = token_response.get("refresh_token")
-    if isinstance(refresh_out, str) and refresh_out.strip():
-        tokens["refresh_token"] = refresh_out.strip()
-    id_token = token_response.get("id_token")
-    if isinstance(id_token, str) and id_token.strip():
-        tokens["id_token"] = id_token.strip()
-    if not isinstance(tokens.get("account_id"), str) or not str(tokens.get("account_id") or "").strip():
-        identity_hint = extract_account_identity(next_auth)
-        if identity_hint.account_id:
-            tokens["account_id"] = identity_hint.account_id
-
-    next_auth["last_refresh"] = datetime.now(timezone.utc).isoformat()
+    next_auth = build_auth_payload(token_response, existing_auth=auth_json)
     identity = extract_account_identity(next_auth)
     upsert_saved_profile(
         label=profile.label,
@@ -3071,98 +3317,44 @@ async def _refresh_saved_auth_via_refresh_token(profile: AccountProfile) -> bool
         subject=identity.subject or profile.subject,
         user_id=identity.user_id or profile.user_id,
         provider_account_id=identity.account_id or profile.provider_account_id,
+        reauth_required=False,
+        reauth_reason=None,
     )
     return True
 
 
-def _refresh_keepalive_supported() -> bool:
-    if settings.openai_token_url and settings.openai_client_id:
-        return True
-    return bool(settings.codex_refresh_enabled and settings.codex_cli_bin)
-
-
-def _write_auth_json(path: Path, auth_json: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(auth_json, ensure_ascii=False, indent=2))
-
-
-def _read_auth_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
-
-
-def _codex_cli_refresh_error_text(stdout: str, stderr: str) -> str:
-    combined = "\n".join(part for part in [stdout.strip(), stderr.strip()] if part).strip()
-    return combined or "Codex CLI refresh failed"
-
-
-def _codex_cli_refresh_attempt(
-    *,
-    auth_json: dict[str, Any],
-    model: str | None,
-    prompt: str,
-    timeout_seconds: int,
-) -> dict[str, Any] | None:
-    with tempfile.TemporaryDirectory(prefix="codex-refresh-") as tmp_dir:
-        home = Path(tmp_dir)
-        auth_path = home / ".codex" / "auth.json"
-        _write_auth_json(auth_path, auth_json)
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        env["USERPROFILE"] = str(home)
-        env["XDG_CONFIG_HOME"] = str(home / ".config")
-        env["XDG_DATA_HOME"] = str(home / ".local" / "share")
-        cmd = [settings.codex_cli_bin, "exec", "--skip-git-repo-check"]
-        if model:
-            cmd += ["-m", model]
-        cmd.append(prompt)
-        result = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(_codex_cli_refresh_error_text(result.stdout, result.stderr))
-        return _read_auth_json(auth_path)
-
-
-async def _refresh_saved_auth_via_codex_cli(profile: AccountProfile) -> bool:
-    auth_json = profile.auth if isinstance(profile.auth, dict) else {}
+async def _refresh_active_auth_via_refresh_token(auth_json: dict[str, Any]) -> bool:
     refresh_token = extract_refresh_token(auth_json)
-    if not refresh_token or not settings.codex_refresh_enabled:
+    if not refresh_token or not settings.openai_token_url or not settings.openai_client_id:
         return False
 
-    def _do_refresh() -> dict[str, Any] | None:
-        model = (settings.codex_refresh_model or "").strip() or None
-        prompt = (settings.codex_refresh_prompt or "").strip() or "Reply with exactly OK."
-        timeout_seconds = max(5, int(settings.codex_refresh_timeout_seconds or 30))
-        try:
-            return _codex_cli_refresh_attempt(
-                auth_json=auth_json,
-                model=model,
-                prompt=prompt,
-                timeout_seconds=timeout_seconds,
-            )
-        except RuntimeError as exc:
-            if model:
-                # Retry without model in case the CLI rejects the provided model.
-                return _codex_cli_refresh_attempt(
-                    auth_json=auth_json,
-                    model=None,
-                    prompt=prompt,
-                    timeout_seconds=timeout_seconds,
-                )
-            raise exc
+    data: dict[str, str] = {
+        "grant_type": "refresh_token",
+        "client_id": settings.openai_client_id,
+        "refresh_token": refresh_token,
+    }
+    if settings.openai_client_secret:
+        data["client_secret"] = settings.openai_client_secret
 
-    next_auth = await asyncio.to_thread(_do_refresh)
-    if not isinstance(next_auth, dict):
-        return False
+    async with httpx.AsyncClient(timeout=20) as client:
+        response = await client.post(
+            settings.openai_token_url,
+            data=data,
+            headers={"Accept": "application/json"},
+        )
+
+    if response.status_code >= 400:
+        raise RuntimeError(response.text.strip() or "Refresh token exchange failed")
+
+    try:
+        token_response = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Invalid refresh token response") from exc
+
+    if not isinstance(token_response, dict):
+        raise RuntimeError("Unexpected refresh token response format")
+
+    next_auth = build_auth_payload(token_response, existing_auth=auth_json)
     old_access = extract_access_token(auth_json) or ""
     new_access = extract_access_token(next_auth) or ""
     if not new_access:
@@ -3170,19 +3362,18 @@ async def _refresh_saved_auth_via_codex_cli(profile: AccountProfile) -> bool:
     if new_access == old_access and next_auth.get("last_refresh") == auth_json.get("last_refresh"):
         return False
 
-    next_auth["last_refresh"] = datetime.now(timezone.utc).isoformat()
-    identity = extract_account_identity(next_auth)
-    upsert_saved_profile(
-        label=profile.label,
-        account_key=identity.account_key or profile.account_key,
-        auth_json=next_auth,
-        email=identity.email or profile.email,
-        name=identity.name or profile.name,
-        subject=identity.subject or profile.subject,
-        user_id=identity.user_id or profile.user_id,
-        provider_account_id=identity.account_id or profile.provider_account_id,
-    )
+    set_active_auth_json(next_auth)
     return True
+
+
+def _refresh_keepalive_supported() -> bool:
+    return bool(settings.openai_token_url and settings.openai_client_id)
+
+
+async def _refresh_active_auth_if_needed(auth_json: dict[str, Any]) -> bool:
+    if not _auth_access_token_expiring_soon(auth_json, leeway_seconds=0):
+        return False
+    return await _refresh_active_auth_via_refresh_token(auth_json)
 
 
 async def _refresh_saved_auths_if_needed() -> int:
@@ -3191,17 +3382,38 @@ async def _refresh_saved_auths_if_needed() -> int:
         auth_json = profile.auth if isinstance(profile.auth, dict) else {}
         if not auth_json or not extract_refresh_token(auth_json):
             continue
+        refresh_status = _refresh_status_payload(
+            profile.account_key,
+            _usage_tracking_payload(profile.account_key),
+        )
+        if refresh_status.get("reauth_required") or profile.reauth_required:
+            continue
         if not _auth_access_token_expiring_soon(auth_json):
             continue
         try:
-            if settings.openai_token_url and settings.openai_client_id:
-                ok = await _refresh_saved_auth_via_refresh_token(profile)
-            else:
-                ok = await _refresh_saved_auth_via_codex_cli(profile)
+            ok = await _refresh_saved_auth_via_refresh_token(profile)
             if ok:
                 refreshed += 1
+                update_saved_profile_reauth_status(
+                    profile.label,
+                    reauth_required=False,
+                    reauth_reason=None,
+                )
+                if profile.account_key:
+                    with suppress(Exception):
+                        set_broker_credential_assignment_disabled(profile.account_key, disabled=False)
         except Exception as exc:
             logger.warning("auth keepalive refresh failed for %s: %s", profile.label, exc)
+            error_text = str(exc)
+            if _refresh_error_requires_reauth(error_text):
+                update_saved_profile_reauth_status(
+                    profile.label,
+                    reauth_required=True,
+                    reauth_reason=error_text,
+                )
+            if profile.account_key and _refresh_error_requires_reauth(error_text):
+                with suppress(Exception):
+                    set_broker_credential_assignment_disabled(profile.account_key, disabled=True)
     return refreshed
 
 
@@ -3386,6 +3598,8 @@ def _account_payload(
         "account_type": _infer_account_type(profile),
         "rate_limits": rate_limits,
         "usage_tracking": usage_tracking,
+        "token_metadata": _saved_profile_token_metadata(profile),
+        "decoded_tokens": _decoded_token_payload(profile.auth),
         "refresh_status": refresh_status,
         "active_lease": (
             {
@@ -3780,15 +3994,39 @@ def _normalize_session_limit_payload(payload: Any) -> dict[str, Any]:
     }
 
 
-def _refresh_profile_session_limits(
+async def _refresh_profile_session_limits(
     profile: AccountProfile,
     *,
     current_label_name: str | None,
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], bool]:
+    usage = _usage_tracking_payload(profile.account_key)
+    refresh_status = _refresh_status_payload(profile.account_key, usage)
+    reauth_required, reauth_reason = _profile_reauth_requirement(profile, refresh_status)
+    if reauth_required:
+        error_msg = str(reauth_reason or "Reauthentication required")
+        _mark_refresh_status(profile.account_key, ok=False, error=error_msg)
+        if profile.account_key:
+            with suppress(Exception):
+                set_broker_credential_assignment_disabled(profile.account_key, disabled=True)
+        account_payload = _account_payload(
+            profile,
+            current_label_name,
+            usage_tracking=usage,
+        )
+        account_payload["rate_limits"] = {"error": error_msg}
+        return account_payload, False
+
     try:
-        switch_label(profile.label)
-        result = read_rate_limits_via_app_server()
-        rate_info = _normalize_session_limit_payload(result.rate_limits)
+        rate_info = await _fetch_session_limits_for_profile(
+            profile,
+            timeout_seconds=timeout_seconds,
+        )
+        account_data = None
+        if isinstance(rate_info, dict):
+            raw_account = rate_info.get("_account")
+            account_data = raw_account if isinstance(raw_account, dict) else None
+            rate_info = {key: value for key, value in rate_info.items() if key != "_account"}
         _sync_profile_usage_from_session_limits(profile, rate_info)
         usage = _usage_tracking_payload(profile.account_key)
         account_payload = _account_payload(
@@ -3797,14 +4035,19 @@ def _refresh_profile_session_limits(
             usage_tracking=usage,
         )
         account_payload["rate_limits"] = rate_info
+        if account_data is not None:
+            account_payload["provider_account"] = account_data
         _mark_refresh_status(profile.account_key, ok=True, error=None)
-        with suppress(Exception):
-            _persist_active_auth_db_copy(profile.label)
+        if profile.account_key:
+            with suppress(Exception):
+                set_broker_credential_assignment_disabled(profile.account_key, disabled=False)
         return account_payload, True
-    except (CodexSwitchError, CodexCLIError) as exc:
+    except CodexCLIError as exc:
         error_msg = str(exc)
         _mark_refresh_status(profile.account_key, ok=False, error=error_msg)
-        usage = _usage_tracking_payload(profile.account_key)
+        if profile.account_key and _refresh_error_requires_reauth(error_msg):
+            with suppress(Exception):
+                set_broker_credential_assignment_disabled(profile.account_key, disabled=True)
         account_payload = _account_payload(
             profile,
             current_label_name,
@@ -3815,7 +4058,9 @@ def _refresh_profile_session_limits(
     except Exception as exc:
         error_msg = str(exc)
         _mark_refresh_status(profile.account_key, ok=False, error=error_msg)
-        usage = _usage_tracking_payload(profile.account_key)
+        if profile.account_key and _refresh_error_requires_reauth(error_msg):
+            with suppress(Exception):
+                set_broker_credential_assignment_disabled(profile.account_key, disabled=True)
         account_payload = _account_payload(
             profile,
             current_label_name,
@@ -3823,6 +4068,50 @@ def _refresh_profile_session_limits(
         )
         account_payload["rate_limits"] = {"error": error_msg}
         return account_payload, False
+
+
+async def _fetch_session_limits_for_profile(
+    profile: AccountProfile,
+    *,
+    timeout_seconds: float | None = None,
+) -> dict[str, Any]:
+    auth_json = profile.auth if isinstance(profile.auth, dict) else {}
+    if not auth_json:
+        raise CodexCLIError(f"No auth payload stored for profile {profile.label}")
+    result = await read_rate_limits_for_auth_async(
+        auth_json,
+        timeout_seconds=(
+            float(timeout_seconds)
+            if timeout_seconds is not None
+            else float(settings.rate_limit_worker_timeout_seconds)
+        ),
+    )
+    payload = _normalize_session_limit_payload(result.rate_limits)
+    if result.account is not None:
+        payload["_account"] = result.account
+    return payload
+
+
+async def _refresh_all_profile_rate_limits() -> tuple[int, int]:
+    profiles = _dedupe_profiles(list_profiles())
+    if not profiles:
+        return 0, 0
+
+    semaphore = asyncio.Semaphore(max(int(_LIVE_REFRESH_CONCURRENCY), 1))
+    current_label_name = get_active_profile_label()
+
+    async def _run(profile: AccountProfile) -> bool:
+        async with semaphore:
+            _, ok = await _refresh_profile_session_limits(
+                profile,
+                current_label_name=current_label_name,
+            )
+            return ok
+
+    results = await asyncio.gather(*(_run(profile) for profile in profiles))
+    refreshed = sum(1 for ok in results if ok)
+    failed = sum(1 for ok in results if not ok)
+    return refreshed, failed
 
 
 def _touch_profiles_usage(profiles: list[AccountProfile]) -> None:
@@ -4256,7 +4545,7 @@ def _persist_current_auth_to_profile(
     resolved_auth = auth_json if isinstance(auth_json, dict) else read_current_auth()
     identity = extract_account_identity(resolved_auth)
     email = identity.email
-    existing = set(list_labels())
+    existing = set(list_auth_labels())
     profiles = _dedupe_profiles(list_profiles())
     matched_profile = _find_matching_profile(profiles, resolved_auth, identity)
     incoming_key = (identity.account_key or "").strip()
@@ -4301,6 +4590,13 @@ def _persist_current_auth_to_profile(
 
     current_for_label = next((p for p in profiles if p.label == label), None)
     if current_for_label is not None and current_for_label.auth == resolved_auth:
+        if current_for_label.reauth_required and not _access_token_expired(resolved_auth):
+            with suppress(Exception):
+                update_saved_profile_reauth_status(
+                    label,
+                    reauth_required=False,
+                    reauth_reason=None,
+                )
         _touch_account_usage(profile=current_for_label)
         return PersistCurrentAuthResult(
             persisted=False,
@@ -4319,7 +4615,7 @@ def _persist_current_auth_to_profile(
     switch_save = save_current_auth_under_label(label)
     profile_for_usage = matched_profile or AccountProfile(
         label=label,
-        path=settings.codex_auth_file(),
+        path=Path("db://active-auth"),
         auth=resolved_auth,
         account_key=identity.account_key,
         subject=identity.subject,
@@ -4401,6 +4697,53 @@ def _find_matching_profile(
     return None
 
 
+def _auth_freshness_tuple(auth_json: dict[str, Any] | None) -> tuple[float, float, float]:
+    if not isinstance(auth_json, dict):
+        return (0.0, 0.0, 0.0)
+    last_refresh_raw = auth_json.get("last_refresh")
+    last_refresh_ts = 0.0
+    if isinstance(last_refresh_raw, str) and last_refresh_raw.strip():
+        with suppress(ValueError):
+            last_refresh_ts = datetime.fromisoformat(
+                last_refresh_raw.replace("Z", "+00:00")
+            ).timestamp()
+    access_claims = decode_jwt_claims(extract_access_token(auth_json)) or {}
+    access_iat = float(access_claims.get("iat") or 0.0)
+    access_exp = float(access_claims.get("exp") or 0.0)
+    return (last_refresh_ts, access_iat, access_exp)
+
+
+def _compare_auth_freshness(
+    current_auth: dict[str, Any] | None,
+    incoming_auth: dict[str, Any] | None,
+) -> int:
+    if not isinstance(current_auth, dict) and not isinstance(incoming_auth, dict):
+        return 0
+    if not isinstance(current_auth, dict):
+        return 1
+    if not isinstance(incoming_auth, dict):
+        return -1
+    if current_auth == incoming_auth:
+        return 0
+    current_tuple = _auth_freshness_tuple(current_auth)
+    incoming_tuple = _auth_freshness_tuple(incoming_auth)
+    if incoming_tuple > current_tuple:
+        return 1
+    if incoming_tuple < current_tuple:
+        return -1
+    current_token = extract_access_token(current_auth) or ""
+    incoming_token = extract_access_token(incoming_auth) or ""
+    if current_token == incoming_token:
+        return 0
+    current_len = len(current_token)
+    incoming_len = len(incoming_token)
+    if incoming_len > current_len:
+        return 1
+    if incoming_len < current_len:
+        return -1
+    return 1
+
+
 def _find_preferred_placeholder_profile(
     profiles: list[AccountProfile], incoming_email: str
 ) -> AccountProfile | None:
@@ -4433,8 +4776,8 @@ def _is_placeholder_profile(profile: AccountProfile) -> bool:
 def _dedupe_profiles(profiles: list[AccountProfile]) -> list[AccountProfile]:
     deduped: dict[str, AccountProfile] = {}
     try:
-        current_label_name = current_label()
-    except CodexSwitchError:
+        current_label_name = get_current_auth_label()
+    except AuthStoreSwitchError:
         current_label_name = None
     for profile in profiles:
         key = _profile_identity_key(profile)
@@ -4843,10 +5186,10 @@ def _resolve_current_label(
     current_auth: dict[str, Any], profiles: list[AccountProfile]
 ) -> str | None:
     try:
-        label = current_label()
+        label = get_current_auth_label()
         if label:
             return label
-    except CodexSwitchError:
+    except AuthStoreSwitchError:
         pass
 
     current_identity = extract_account_identity(current_auth)
@@ -4944,17 +5287,15 @@ def _validate_relay_finalized_auth(
     return result
 
 
-def _auth_file_metadata(path: Path) -> dict[str, Any]:
-    exists = path.exists()
-    stat = path.stat() if exists else None
-    modified_at = (
-        datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat() if stat else None
-    )
+def _auth_file_metadata() -> dict[str, Any]:
+    active_auth = get_active_auth_json()
+    updated_at = get_active_auth_updated_at()
+    encoded = json.dumps(active_auth, sort_keys=True) if isinstance(active_auth, dict) else None
     return {
-        "path": str(path),
-        "exists": exists,
-        "size_bytes": stat.st_size if stat else None,
-        "modified_at": modified_at,
+        "path": "db://active-auth",
+        "exists": isinstance(active_auth, dict),
+        "size_bytes": len(encoded.encode("utf-8")) if encoded is not None else None,
+        "modified_at": updated_at,
     }
 
 

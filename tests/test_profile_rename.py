@@ -16,7 +16,7 @@ class ProfileRenameTests(unittest.TestCase):
             patch("app.main.get_saved_profile", side_effect=[{"label": "old", "auth_json": {}}, None]),
             patch("app.main.rename_saved_profile", return_value=True) as rename_profile_mock,
             patch("app.main.rename_account_data") as rename_usage_mock,
-            patch("app.main.current_label", return_value=None),
+            patch("app.main.get_current_auth_label", return_value=None),
         ):
             response = asyncio.run(
                 auth_rename(

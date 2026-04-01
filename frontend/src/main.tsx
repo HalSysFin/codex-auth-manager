@@ -1366,7 +1366,7 @@ function App() {
       void loadOpenClawCredentialUsage(token, selectedRange).catch(() => {})
     })
 
-    es.addEventListener('error', (ev) => {
+    es.addEventListener('account_error', (ev) => {
       const raw = (ev as MessageEvent).data
       let msg = 'Refresh error'
       try {
@@ -1391,12 +1391,36 @@ function App() {
     })
 
     es.addEventListener('complete', () => {
+      setAccounts((prev) =>
+        prev.map((account) => {
+          if (account.refresh_status?.state !== 'refreshing') return account
+          return {
+            ...account,
+            refresh_status: {
+              ...(account.refresh_status || {}),
+              state: account.refresh_status?.reauth_required ? 'failed' : 'ok',
+            },
+          }
+        }),
+      )
       setRefreshing(false)
       setStatus('Refresh complete')
       stopStream()
     })
 
     es.onerror = () => {
+      setAccounts((prev) =>
+        prev.map((account) => {
+          if (account.refresh_status?.state !== 'refreshing') return account
+          return {
+            ...account,
+            refresh_status: {
+              ...(account.refresh_status || {}),
+              state: account.refresh_status?.reauth_required ? 'failed' : 'idle',
+            },
+          }
+        }),
+      )
       setRefreshing(false)
       setStatus('Refresh stream closed')
       stopStream()
@@ -1826,7 +1850,7 @@ function App() {
     }
     setErr(null)
     setAddAccountLoading(true)
-    setAddAccountFeedback('Submitting callback to Codex CLI...')
+    setAddAccountFeedback('Submitting callback to Auth Manager...')
     setAddAccountFeedbackTone('info')
     try {
       const parsedUrl = new URL(fullUrl)
@@ -1843,7 +1867,7 @@ function App() {
           label: addLabelInput.trim() || undefined,
         }),
       })
-      setAddAccountFeedback('Callback accepted. Waiting for Codex CLI to finalize auth...')
+      setAddAccountFeedback('Callback accepted. Waiting for Auth Manager to finalize auth...')
       setAddAccountFeedbackTone('info')
       const loginStatus = await pollAddAccountFinalization()
       const autoPersist = loginStatus.auto_persist || {}
@@ -2355,11 +2379,6 @@ function App() {
                       <CodexBadge />
                     </div>
                     <div className="muted mono">Profile label: {sensitiveText(a.label)}</div>
-                    {requiresReauth ? (
-                      <div className="muted mono" style={{ color: '#fca5a5' }}>
-                        {a.refresh_status?.last_error || 'This auth needs to be signed in again before it can be assigned.'}
-                      </div>
-                    ) : null}
                     {a.active_lease ? (
                       <div className="muted mono">
                         Leased to {a.active_lease.machine_id} / {a.active_lease.agent_id}
@@ -3233,7 +3252,7 @@ function App() {
               <button className="btn btn-sm" onClick={() => setAddAccountModalOpen(false)}>Close</button>
             </div>
             <p className="muted" style={{ marginTop: 0 }}>
-              Use this manual Add Account flow for same-device or cross-device login. Auth Manager will pass the pasted callback to Codex CLI, then save a new profile or update the matching existing profile based on the finalized auth identity.
+              Use this manual Add Account flow for same-device or cross-device login. Auth Manager will exchange the pasted callback in-app, store the active auth in the database, and then save a new profile or update the matching existing profile based on the finalized auth identity.
             </p>
             {addAuthUrl ? (
               <div className="manual-auth-panel">

@@ -1,5 +1,7 @@
 import type {
+  AuthPayload,
   LeaseAcquireResponse,
+  LeaseAuthReconcileResponse,
   LeaseRotateResponse,
   LeaseStatusResponse,
   LeaseTelemetryRequest,
@@ -140,6 +142,21 @@ export class AuthManagerClient {
       body: {
         machine_id: input.machineId,
         agent_id: input.agentId,
+      },
+    })
+  }
+
+  async reconcileLeaseAuth(leaseId: string, input: {
+    machineId: string
+    agentId: string
+    authJson: AuthPayload
+  }): Promise<LeaseAuthReconcileResponse> {
+    return this.request<LeaseAuthReconcileResponse>(`/api/leases/${encodeURIComponent(leaseId)}/reconcile-auth`, {
+      method: 'POST',
+      body: {
+        machine_id: input.machineId,
+        agent_id: input.agentId,
+        auth_json: input.authJson,
       },
     })
   }
